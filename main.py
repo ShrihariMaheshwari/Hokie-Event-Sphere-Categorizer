@@ -100,7 +100,10 @@ async def process_ticketmaster_event(event: dict):
         # Generate unique identifier for Ticketmaster events
         event_identifier = f"TM-{event.get('id', '')}"
 
-        # Construct event data without ObjectId
+        # Create a dummy ObjectId for organizerId
+        organizer_id = str(ObjectId())
+
+        # Construct event data with string ID
         processed_event = {
             'title': event['name'],
             'description': event.get('description', 'No description available'),
@@ -111,7 +114,8 @@ async def process_ticketmaster_event(event: dict):
             'endTime': end_time,
             'registrationFee': registration_fee,
             'imageUrl': event.get('images', [{'url': None}])[0].get('url'),
-            'organizerType': 'ticketmaster',  # Changed from organizerId
+            'organizerId': organizer_id,  # Using generated ObjectId string
+            'organizerType': 'ticketmaster',
             'organizerEmail': 'events@ticketmaster.com',
             'source': 'ticketmaster',
             'ticketmaster_id': event_identifier,
@@ -122,7 +126,7 @@ async def process_ticketmaster_event(event: dict):
         required_fields = [
             'title', 'venue', 'startTime', 'endTime', 
             'startDate', 'endDate', 'organizerEmail', 
-            'description', 'organizerType'  # Changed from organizerId
+            'description', 'organizerId'
         ]
         
         missing_fields = [field for field in required_fields if not processed_event.get(field)]
@@ -141,10 +145,9 @@ async def process_ticketmaster_event(event: dict):
 async def categorize_manual_event(event_id: str):
     """Endpoint for categorizing manually created events"""
     try:
-        # Validate ObjectId format
         if not ObjectId.is_valid(event_id):
             raise HTTPException(status_code=400, detail="Invalid event ID format")
-            
+        
         obj_id = ObjectId(event_id)
         event = await db.events.find_one({"_id": obj_id})
         
@@ -181,15 +184,15 @@ async def categorize_manual_event(event_id: str):
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
     """Endpoint for categorizing Ticketmaster events"""
     try:
+        # Process and validate the Ticketmaster event
         processed_event = await process_ticketmaster_event(event_data)
         
         if not processed_event:
-            print(f"Failed to process event: {event_data.get('name', 'Unknown Event')}")
-            raise HTTPException(
-                status_code=400,
-                detail="Event could not be processed due to missing required data"
-            )
+            error_msg = f"Failed to process event: {event_data.get('name', 'Unknown Event')}"
+            print(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
 
+        # Get categories from GPT
         try:
             categories = await categorize_with_gpt({
                 'title': processed_event['title'],
@@ -209,17 +212,27 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
 
         # Save to MongoDB using ticketmaster_id as unique identifier
         try:
-            result = await db.events.update_one(
-                {'ticketmaster_id': processed_event['ticketmaster_id']},
-                {'$set': processed_event},
-                upsert=True
-            )
+            # Check if event already exists
+            existing_event = await db.events.find_one({
+                'ticketmaster_id': processed_event['ticketmaster_id']
+            })
+            
+            if existing_event:
+                # Update existing event
+                result = await db.events.update_one(
+                    {'ticketmaster_id': processed_event['ticketmaster_id']},
+                    {'$set': {
+                        **processed_event,
+                        '_id': existing_event['_id']  # Preserve existing _id
+                    }}
+                )
+                processed_event['_id'] = str(existing_event['_id'])
+            else:
+                # Insert new event
+                result = await db.events.insert_one(processed_event)
+                processed_event['_id'] = str(result.inserted_id)
             
             print(f"Successfully categorized and saved Ticketmaster event: {processed_event['title']}")
-            
-            if result.upserted_id:
-                processed_event['_id'] = str(result.upserted_id)
-            
             return processed_event
 
         except Exception as db_error:
@@ -229,8 +242,9 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
     except HTTPException as http_error:
         raise http_error
     except Exception as e:
-        print(f"Unexpected error in categorize_ticketmaster_event: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        error_msg = f"Unexpected error in categorize_ticketmaster_event: {str(e)}"
+        print(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.get("/")
 async def root():
