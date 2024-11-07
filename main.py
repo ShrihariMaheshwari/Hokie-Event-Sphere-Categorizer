@@ -58,10 +58,12 @@ async def categorize_with_gpt(event_data: Dict[str, Any]):
             temperature=0.3
         )
 
-        return eval(response.choices[0].message.content.strip())
+        categories = eval(response.choices[0].message.content.strip())
+        print(f"GPT Categories: {categories}")
+        return categories
     except Exception as e:
         print(f"Error in categorization: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"main_category": "Others", "sub_category": "Miscellaneous Events"}
 
 async def process_ticketmaster_event(event: dict):
     """Transform Ticketmaster event data to match our schema"""
@@ -73,6 +75,7 @@ async def process_ticketmaster_event(event: dict):
             start_date = datetime.fromisoformat(event['dates']['start']['localDate'])
             start_time = event['dates']['start'].get('localTime', '19:00:00')
             
+            # Calculate end time (default to 3 hours after start if not provided)
             end_time = event['dates'].get('end', {}).get('localTime', '')
             if not end_time:
                 start_datetime = datetime.strptime(start_time, '%H:%M:%S')
@@ -84,7 +87,10 @@ async def process_ticketmaster_event(event: dict):
             )
         except Exception as date_error:
             print(f"Error processing dates for event {event.get('name')}: {str(date_error)}")
-            raise
+            start_date = datetime.now()
+            end_date = datetime.now() + timedelta(hours=3)
+            start_time = "19:00:00"
+            end_time = "22:00:00"
 
         # Calculate registration fee
         registration_fee = 0
@@ -94,19 +100,25 @@ async def process_ticketmaster_event(event: dict):
         # Get venue information
         try:
             venue = event['_embedded']['venues'][0]['name']
+            venue_address = event['_embedded']['venues'][0].get('address', {}).get('line1', '')
+            venue_city = event['_embedded']['venues'][0].get('city', {}).get('name', '')
+            venue_state = event['_embedded']['venues'][0].get('state', {}).get('name', '')
+            full_address = f"{venue_address}, {venue_city}, {venue_state}".strip()
         except (KeyError, IndexError):
             venue = "Venue Not Specified"
+            full_address = "Address Not Available"
 
         # Generate unique identifier for Ticketmaster events
         event_identifier = f"TM-{event.get('id', '')}"
 
-        # Create a dummy ObjectId for organizerId
-        organizer_id = str(ObjectId())
+        # Process description
+        description = event.get('description', event.get('info', ''))
+        if not description:
+            description = f"Join us for {event['name']} at {venue}. Don't miss this exciting event!"
 
-        # Construct event data with string ID
         processed_event = {
             'title': event['name'],
-            'description': event.get('description', 'No description available'),
+            'description': description,
             'venue': venue,
             'startDate': start_date,
             'endDate': end_date,
@@ -114,26 +126,13 @@ async def process_ticketmaster_event(event: dict):
             'endTime': end_time,
             'registrationFee': registration_fee,
             'imageUrl': event.get('images', [{'url': None}])[0].get('url'),
-            'organizerId': organizer_id,  # Using generated ObjectId string
             'organizerType': 'ticketmaster',
             'organizerEmail': 'events@ticketmaster.com',
             'source': 'ticketmaster',
             'ticketmaster_id': event_identifier,
+            'address': full_address,
             'rsvps': []
         }
-
-        # Validate required fields
-        required_fields = [
-            'title', 'venue', 'startTime', 'endTime', 
-            'startDate', 'endDate', 'organizerEmail', 
-            'description', 'organizerId'
-        ]
-        
-        missing_fields = [field for field in required_fields if not processed_event.get(field)]
-        
-        if missing_fields:
-            print(f"Event {event['name']} missing required fields: {missing_fields}")
-            return None
 
         return processed_event
 
@@ -168,11 +167,7 @@ async def categorize_manual_event(event_id: str):
         )
         
         if update_result.modified_count > 0:
-            print(f"Successfully added categories to event: {event['title']}")
-            return {
-                "success": True,
-                "categories": categories
-            }
+            return {"success": True, "categories": categories}
         else:
             raise HTTPException(status_code=500, detail="Failed to update event categories")
 
@@ -199,18 +194,18 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
                 'description': processed_event['description'],
                 'venue': processed_event['venue']
             })
+            processed_event.update(categories)
         except Exception as gpt_error:
             print(f"GPT Categorization error: {str(gpt_error)}")
-            raise HTTPException(status_code=500, detail=f"Categorization error: {str(gpt_error)}")
+            processed_event['main_category'] = "Others"
+            processed_event['sub_category'] = "Miscellaneous Events"
 
-        # Add categories and timestamps
+        # Add timestamps
         processed_event.update({
-            **categories,
             'createdAt': datetime.utcnow(),
             'updatedAt': datetime.utcnow()
         })
 
-        # Save to MongoDB using ticketmaster_id as unique identifier
         try:
             # Check if event already exists
             existing_event = await db.events.find_one({
@@ -219,28 +214,24 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
             
             if existing_event:
                 # Update existing event
-                result = await db.events.update_one(
-                    {'ticketmaster_id': processed_event['ticketmaster_id']},
-                    {'$set': {
-                        **processed_event,
-                        '_id': existing_event['_id']  # Preserve existing _id
-                    }}
+                processed_event['_id'] = existing_event['_id']
+                await db.events.replace_one(
+                    {'_id': existing_event['_id']},
+                    processed_event
                 )
-                processed_event['_id'] = str(existing_event['_id'])
             else:
                 # Insert new event
                 result = await db.events.insert_one(processed_event)
-                processed_event['_id'] = str(result.inserted_id)
+                processed_event['_id'] = result.inserted_id
             
-            print(f"Successfully categorized and saved Ticketmaster event: {processed_event['title']}")
             return processed_event
 
         except Exception as db_error:
             print(f"Database Error: {str(db_error)}")
             raise HTTPException(status_code=500, detail=f"Database error: {str(db_error)}")
 
-    except HTTPException as http_error:
-        raise http_error
+    except HTTPException:
+        raise
     except Exception as e:
         error_msg = f"Unexpected error in categorize_ticketmaster_event: {str(e)}"
         print(error_msg)
