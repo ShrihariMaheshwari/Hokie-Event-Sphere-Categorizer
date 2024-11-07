@@ -15,7 +15,6 @@ class TicketmasterSync:
     async def fetch_events(self):
         """Fetch events from Ticketmaster API"""
         base_url = "https://app.ticketmaster.com/discovery/v2/events.json"
-        
         start_date = datetime.now()
         end_date = start_date + timedelta(days=30)
         
@@ -99,14 +98,16 @@ class TicketmasterSync:
 
 async def start_scheduler():
     sync_service = TicketmasterSync()
-    scheduler = AsyncIOScheduler()
+    
+    # Run sync immediately on startup
+    await sync_service.sync()
 
+    # Set up the scheduler for repeated syncing
+    scheduler = AsyncIOScheduler()
     timezone = pytz.timezone('UTC')
     
-    # Schedule job to run every 12 hours
+    # Schedule the job to run every 12 hours
     scheduler.add_job(sync_service.sync, 'interval', hours=12, timezone=timezone)
-    # Also run immediately on startup
-    scheduler.add_job(sync_service.sync, 'date', run_date=datetime.now())
     
     scheduler.start()
     print("Ticketmaster sync scheduler started...")
@@ -116,6 +117,7 @@ async def start_scheduler():
             await asyncio.sleep(1)
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown()
+        await sync_service.mongo_client.close()  # Close MongoDB client on shutdown
 
 if __name__ == "__main__":
     asyncio.run(start_scheduler())
