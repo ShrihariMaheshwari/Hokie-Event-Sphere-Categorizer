@@ -198,14 +198,16 @@ async def process_ticketmaster_event(event: dict):
             registration_fee = 0
 
         # Process description with multiple fallbacks
-        description = (
+        base_description = (
             event.get('description') or 
             event.get('info') or 
-            event.get('pleaseNote') or
-            event.get('additionalInfo') or
-            f"Join us for {event['name']} at {venue}! Experience this exciting event live. "
-            f"{"Tickets available now!" if event.get('url') else "Contact venue for more details."}"
+            event.get('pleaseNote') or 
+            event.get('additionalInfo')
         )
+        
+        if not base_description:
+            ticket_info = "Tickets available now!" if event.get('url') else "Contact venue for more details."
+            base_description = f"Join us for {event['name']} at {venue}! Experience this exciting event live. {ticket_info}"
 
         # Generate unique identifier
         event_identifier = f"TM-{event.get('id', str(ObjectId()))}"
@@ -213,7 +215,7 @@ async def process_ticketmaster_event(event: dict):
         # Create initial event data
         event_data = {
             'title': event['name'],
-            'description': description,
+            'description': base_description,
             'venue': venue,
             'startDate': start_date,
             'endDate': end_date,
