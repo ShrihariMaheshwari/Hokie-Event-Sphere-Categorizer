@@ -4,7 +4,9 @@ import aiohttp
 import asyncio
 import os
 from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
 import motor.motor_asyncio
+from bson import ObjectId
 
 class TicketmasterSync:
     def __init__(self):
@@ -20,7 +22,7 @@ class TicketmasterSync:
         
         params = {
             'apikey': self.ticketmaster_key,
-            'city': 'Blacksburg',
+            'city': 'Washinton',
             'stateCode': 'VA',
             'startDateTime': start_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
             'endDateTime': end_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -38,38 +40,6 @@ class TicketmasterSync:
             print(f"Error fetching events: {e}")
             return []
 
-    async def process_event(self, event):
-        """Process and categorize individual Ticketmaster event"""
-        try:
-            event_data = {
-                'title': event['name'],
-                'description': event.get('description', ''),
-                'venue': event['_embedded']['venues'][0]['name'],
-                'startDate': event['dates']['start']['localDate'],
-                'startTime': event['dates']['start'].get('localTime', '19:00:00'),
-                'endTime': event['dates']['start'].get('localTime', '22:00:00'),
-                'source': 'ticketmaster',
-                'imageUrl': event['images'][0]['url'] if event.get('images') else None,
-                'registrationFee': event['priceRanges'][0]['min'] if event.get('priceRanges') else 0
-            }
-
-            # Make request to categorize endpoint
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{os.getenv('SELF_URL', 'http://localhost:8000')}/categorize",
-                    json=event_data
-                ) as response:
-                    if response.status == 200:
-                        categorized_event = await response.json()
-                        return {
-                            **categorized_event,
-                            'ticketmaster_id': event['id']
-                        }
-            return None
-        except Exception as e:
-            print(f"Error processing event: {e}")
-            return None
-
     async def sync(self):
         """Main sync function"""
         try:
@@ -78,21 +48,34 @@ class TicketmasterSync:
             events = await self.fetch_events()
             print(f"Fetched {len(events)} events from Ticketmaster")
 
+            successful_syncs = 0
+            failed_syncs = 0
+
             for event in events:
                 try:
-                    processed_event = await self.process_event(event)
-                    if processed_event:
-                        # Upsert to MongoDB
-                        await self.db.events.update_one(
-                            {'ticketmaster_id': processed_event['ticketmaster_id']},
-                            {'$set': processed_event},
-                            upsert=True
-                        )
+                    # Make request to categorize endpoint
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            f"{os.getenv('SELF_URL')}/categorize/ticketmaster",
+                            json=event
+                        ) as response:
+                            if response.status == 200:
+                                successful_syncs += 1
+                            else:
+                                failed_syncs += 1
+                                print(f"Failed to sync event {event.get('name')}: {await response.text()}")
+                                
                 except Exception as e:
+                    failed_syncs += 1
                     print(f"Error processing individual event: {e}")
                     continue
 
-            print("Ticketmaster sync completed")
+            print(f"""
+            Ticketmaster sync completed:
+            - Total events processed: {len(events)}
+            - Successfully synced: {successful_syncs}
+            - Failed to sync: {failed_syncs}
+            """)
         except Exception as e:
             print(f"Error in sync: {e}")
 
@@ -118,6 +101,3 @@ async def start_scheduler():
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown()
         await sync_service.mongo_client.close()  # Close MongoDB client on shutdown
-
-if __name__ == "__main__":
-    asyncio.run(start_scheduler())
