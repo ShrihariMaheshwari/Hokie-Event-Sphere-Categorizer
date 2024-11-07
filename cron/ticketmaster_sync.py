@@ -1,4 +1,5 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytz
 import aiohttp
 import asyncio
 import os
@@ -99,9 +100,11 @@ class TicketmasterSync:
 async def start_scheduler():
     sync_service = TicketmasterSync()
     scheduler = AsyncIOScheduler()
+
+    timezone = pytz.timezone('UTC')
     
     # Schedule job to run every 12 hours
-    scheduler.add_job(sync_service.sync, 'interval', hours=12)
+    scheduler.add_job(sync_service.sync, 'interval', hours=12, timezone=timezone)
     # Also run immediately on startup
     scheduler.add_job(sync_service.sync, 'date', run_date=datetime.now())
     
