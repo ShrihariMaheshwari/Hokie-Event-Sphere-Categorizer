@@ -35,21 +35,16 @@ def format_datetime(dt):
     return str(dt)
 
 async def categorize_with_gpt(event_data: Dict[str, Any]):
-    """Categorize event using GPT-3.5"""
+    """Categorize event using GPT-3.5 with comprehensive prompt"""
     try:
-        # Format dates for the prompt
-        start_date = format_datetime(event_data.get('startDate', 'N/A'))
-        start_time = event_data.get('startTime', 'N/A')
-        
-        # Create event info string with proper formatting
+        # Format the event info string
         event_info = (
             f"Event: {event_data['title']}, "
-            f"Date: {start_date}, "
-            f"Time: {start_time}, "
+            f"Date: {event_data.get('startDate', 'N/A')}, "
+            f"Time: {event_data.get('startTime', 'N/A')}, "
             f"Venue: {event_data['venue']}, "
-            f"Address: {event_data.get('address', 'N/A')}, "
             f"Price: {event_data.get('registrationFee', 'N/A')}, "
-            f"Description: {event_data['description']}"
+            f"Description: {event_data.get('description', 'N/A')}"
         )
 
         prompt = f"""
@@ -93,230 +88,98 @@ async def categorize_with_gpt(event_data: Dict[str, Any]):
         response = await openai.ChatCompletion.acreate(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an event planner AI that specializes in categorizing and formatting event information."},
+                {"role": "system", "content": "You are an event categorizer that specializes in organizing and describing events."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
-            max_tokens=500
+            temperature=0.7
         )
 
-        # Parse the response
         try:
-            result_text = response.choices[0].message.content.strip()
-            # Try to parse the response as JSON first
-            try:
-                result = json.loads(result_text)
-            except json.JSONDecodeError:
-                # If JSON parsing fails, try using eval as fallback
-                result = eval(result_text)
-
-            print(f"GPT Response for {event_data['title']}: {result}")
-            
-            # Update the event data with the processed information
+            result = json.loads(response.choices[0].message.content.strip())
             return {
                 'title': result['event_name'],
-                'venue': result['venue'],
                 'description': result['description'],
                 'main_category': result['main_category'],
                 'sub_category': result['sub_category'],
-                'address': result['location'],
-                # Keep original dates and times if they exist
-                'startDate': event_data.get('startDate', result.get('date')),
-                'startTime': event_data.get('startTime', result.get('time')),
-                'registrationFee': result['price'] if result['price'] not in ['Free', 'TBA'] else 0
+                'registrationFee': float(result['price']) if result['price'] not in ['Free', 'TBA'] else 0,
+                'venue': result['venue']
             }
         except Exception as parse_error:
             print(f"Error parsing GPT response: {parse_error}")
-            print(f"Raw response: {response.choices[0].message.content}")
-            # Return default values if parsing fails
             return {
                 'main_category': "Others",
                 'sub_category': "Miscellaneous Events",
-                'description': event_data['description']
+                'description': event_data.get('description', f"Join us for {event_data['title']} at {event_data['venue']}!")
             }
 
     except Exception as e:
-        print(f"Error in categorization: {e}")
+        print(f"Error in GPT categorization: {e}")
         return {
             'main_category': "Others",
             'sub_category': "Miscellaneous Events",
-            'description': event_data['description']
+            'description': event_data.get('description', f"Join us for {event_data['title']} at {event_data['venue']}!")
         }
 
 async def process_ticketmaster_event(event: dict):
-    """Transform Ticketmaster event data to match our schema"""
+    """Process Ticketmaster event to match MongoDB schema"""
     try:
-        event_name = event.get('name')
-        if not event_name:
-            print("Event name is missing")
-            return None
+        # Extract basic event details
+        start_date = datetime.fromisoformat(event['dates']['start']['localDate'])
+        start_time = event['dates']['start'].get('localTime', '19:00:00')
+        
+        # Calculate end time if not provided
+        end_time = event['dates'].get('end', {}).get('localTime', '')
+        if not end_time:
+            end_datetime = datetime.strptime(start_time, '%H:%M:%S') + timedelta(hours=3)
+            end_time = end_datetime.strftime('%H:%M:%S')
 
-        print(f"Processing event: {event_name}")
+        # Get end date
+        end_date = datetime.fromisoformat(
+            event['dates'].get('end', {}).get('localDate', event['dates']['start']['localDate'])
+        )
 
-        # Extract dates with better error handling
-        try:
-            dates_info = event.get('dates', {}).get('start', {})
-            if not dates_info:
-                print(f"Missing dates information for event: {event_name}")
-                return None
+        # Process venue and price
+        venue = event.get('_embedded', {}).get('venues', [{}])[0].get('name', 'Venue Not Specified')
+        registration_fee = 0
+        if event.get('priceRanges'):
+            registration_fee = min(price['min'] for price in event['priceRanges'])
 
-            start_date = datetime.fromisoformat(dates_info.get('localDate', datetime.now().strftime('%Y-%m-%d')))
-            start_time = dates_info.get('localTime', '19:00:00')
-            
-            end_info = event.get('dates', {}).get('end', {})
-            end_time = end_info.get('localTime', '')
-            if not end_time:
-                try:
-                    start_datetime = datetime.strptime(start_time, '%H:%M:%S')
-                    end_datetime = start_datetime + timedelta(hours=3)
-                    end_time = end_datetime.strftime('%H:%M:%S')
-                except:
-                    end_time = '22:00:00'
-
-            end_date = datetime.fromisoformat(
-                end_info.get('localDate', dates_info.get('localDate', datetime.now().strftime('%Y-%m-%d')))
-            )
-        except Exception as date_error:
-            print(f"Date error for {event_name}: {str(date_error)}")
-            current_time = datetime.now()
-            start_date = current_time
-            end_date = current_time + timedelta(hours=3)
-            start_time = "19:00:00"
-            end_time = "22:00:00"
-
-        # Venue processing with better error handling
-        try:
-            venue_info = event.get('_embedded', {}).get('venues', [{}])[0]
-            venue = venue_info.get('name', 'Venue Not Specified')
-            
-            address_parts = []
-            if venue_address := venue_info.get('address', {}).get('line1'):
-                address_parts.append(venue_address)
-            if venue_city := venue_info.get('city', {}).get('name'):
-                address_parts.append(venue_city)
-            if venue_state := venue_info.get('state', {}).get('name'):
-                address_parts.append(venue_state)
-            
-            full_address = ", ".join(address_parts) if address_parts else "Address Not Available"
-        except Exception as venue_error:
-            print(f"Venue error for {event_name}: {str(venue_error)}")
-            venue = "Venue Not Specified"
-            full_address = "Address Not Available"
-
-        # Price processing with better error handling
-        try:
-            registration_fee = 0
-            if price_ranges := event.get('priceRanges', []):
-                prices = [pr.get('min', 0) for pr in price_ranges if pr.get('min') is not None]
-                registration_fee = min(prices) if prices else 0
-        except Exception as price_error:
-            print(f"Price error for {event_name}: {str(price_error)}")
-            registration_fee = 0
-
-        # Description processing with better fallbacks
-        description_options = [
-            event.get('description'),
-            event.get('info'),
-            event.get('pleaseNote'),
-            event.get('additionalInfo')
-        ]
-        description = next((desc for desc in description_options if desc), None)
-        if not description:
-            ticket_info = "Tickets available now!" if event.get('url') else "Contact venue for more details."
-            description = f"Join us for {event_name} at {venue}! Experience this exciting event live. {ticket_info}"
-
-        # Generate unique identifier
-        event_identifier = f"TM-{event.get('id', str(ObjectId()))}"
-
-        # Create event data with default categories
+        # Create base event data
         event_data = {
-            'title': event_name,
-            'description': description,
+            'title': event['name'],
             'venue': venue,
-            'startDate': start_date,
-            'endDate': end_date,
             'startTime': start_time,
             'endTime': end_time,
+            'startDate': start_date,
+            'endDate': end_date,
             'registrationFee': registration_fee,
-            'imageUrl': event.get('images', [{'url': None}])[0].get('url'),
-            'organizerType': 'ticketmaster',
             'organizerEmail': 'events@ticketmaster.com',
-            'source': 'ticketmaster',
-            'ticketmaster_id': event_identifier,
-            'address': full_address,
-            'rsvps': [],
-            'main_category': 'Others',  # Default category
-            'sub_category': 'Miscellaneous Events'  # Default subcategory
+            'description': event.get('description', f"Join us for {event['name']} at {venue}!"),
+            'imageUrl': event.get('images', [{'url': None}])[0].get('url'),
+            'organizerId': 'ticketmaster',
+            'rsvps': []
         }
 
         # Get enhanced data from GPT
-        try:
-            enhanced_data = await categorize_with_gpt(event_data)
-            if enhanced_data and isinstance(enhanced_data, dict):
-                event_data.update(enhanced_data)
-        except Exception as gpt_error:
-            print(f"GPT categorization error for {event_name}: {str(gpt_error)}")
+        enhanced_data = await categorize_with_gpt(event_data)
+        if enhanced_data:
+            event_data.update(enhanced_data)
 
         return event_data
 
     except Exception as e:
-        print(f"Detailed error processing Ticketmaster event: {type(e).__name__}: {str(e)}")
+        print(f"Error processing Ticketmaster event: {e}")
         return None
-
-@app.post("/categorize/{event_id}")
-async def categorize_manual_event(event_id: str):
-    """Endpoint for categorizing manually created events"""
-    try:
-        if not ObjectId.is_valid(event_id):
-            raise HTTPException(status_code=400, detail="Invalid event ID format")
-        
-        obj_id = ObjectId(event_id)
-        event = await db.events.find_one({"_id": obj_id})
-        
-        if not event:
-            raise HTTPException(status_code=404, detail="Event not found")
-
-        enhanced_data = await categorize_with_gpt(event)
-        
-        if not enhanced_data:
-            raise HTTPException(status_code=500, detail="Failed to categorize event")
-
-        update_result = await db.events.update_one(
-            {"_id": obj_id},
-            {
-                "$set": {
-                    "main_category": enhanced_data["main_category"],
-                    "sub_category": enhanced_data["sub_category"],
-                    "description": enhanced_data["description"],
-                    "updatedAt": datetime.utcnow()
-                }
-            }
-        )
-        
-        if update_result.modified_count > 0:
-            return {"success": True, "categories": enhanced_data}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to update event categories")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error in categorize_event: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/categorize/ticketmaster")
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
     """Endpoint for categorizing Ticketmaster events"""
     try:
-        if not event_data:
-            raise HTTPException(status_code=400, detail="No event data provided")
-
         processed_event = await process_ticketmaster_event(event_data)
         
         if not processed_event:
-            error_msg = f"Failed to process event: {event_data.get('name', 'Unknown Event')}"
-            print(error_msg)
-            return None  # Return None instead of raising an exception
+            print(f"Failed to process event: {event_data.get('name', 'Unknown Event')}")
+            return None
 
         # Add timestamps
         current_time = datetime.utcnow()
@@ -324,42 +187,64 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
         processed_event['updatedAt'] = current_time
 
         try:
-            # Check if event already exists
-            existing_event = await db.events.find_one({
-                'ticketmaster_id': processed_event['ticketmaster_id']
-            })
+            # Save to MongoDB
+            result = await db.events.insert_one(processed_event)
+            processed_event['_id'] = str(result.inserted_id)
             
-            if existing_event:
-                # Update existing event
-                result = await db.events.replace_one(
-                    {'_id': existing_event['_id']},
-                    {**processed_event, '_id': existing_event['_id']}
-                )
-                processed_event['_id'] = str(existing_event['_id'])
-            else:
-                # Insert new event
-                result = await db.events.insert_one(processed_event)
-                processed_event['_id'] = str(result.inserted_id)
-            
-            print(f"Successfully saved event: {processed_event['title']}")
+            print(f"Successfully processed event: {processed_event['title']}")
             return processed_event
 
         except Exception as db_error:
-            print(f"Database Error for {processed_event.get('title', 'Unknown Event')}: {str(db_error)}")
-            return None  # Return None instead of raising an exception
+            print(f"Database Error: {str(db_error)}")
+            return None
 
     except Exception as e:
-        error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
-        print(error_msg)
+        print(f"Error in event processing: {str(e)}")
         return None
+
+@app.post("/categorize/{event_id}")
+async def categorize_manual_event(event_id: str):
+    """Endpoint for categorizing manually created events"""
+    try:
+        obj_id = ObjectId(event_id)
+        event = await db.events.find_one({"_id": obj_id})
+        
+        if not event:
+            return {"error": "Event not found"}
+
+        # Get categories from GPT
+        enhanced_data = await categorize_with_gpt(event)
+        
+        if enhanced_data:
+            # Update the event with new categories and description
+            update_result = await db.events.update_one(
+                {"_id": obj_id},
+                {
+                    "$set": {
+                        "main_category": enhanced_data["main_category"],
+                        "sub_category": enhanced_data["sub_category"],
+                        "description": enhanced_data["description"],
+                        "updatedAt": datetime.utcnow()
+                    }
+                }
+            )
+            
+            if update_result.modified_count > 0:
+                return {"success": True, "data": enhanced_data}
+        
+        return {"success": False, "error": "Failed to update event"}
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return {"success": False, "error": str(e)}
 
 @app.get("/")
 async def root():
     return {
         "message": "Welcome to Hokie Event Categorizer API",
         "endpoints": {
-            "/categorize/{event_id}": "Add categories to manually created events",
-            "/categorize/ticketmaster": "Categorize and save Ticketmaster events",
+            "/categorize/{event_id}": "Categorize existing events",
+            "/categorize/ticketmaster": "Process and categorize Ticketmaster events",
             "/health": "Health check endpoint"
         }
     }
@@ -374,39 +259,42 @@ async def health_check():
             "timestamp": datetime.utcnow()
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow()
+        }
 
 @app.on_event("startup")
 async def startup_event():
-    """Startup event handler with environment variable checks"""
-    print("\nStarting up FastAPI service...")
+    """Startup event handler"""
+    print("\nStarting FastAPI service...")
     
+    # Check environment variables
     required_vars = {
         "MONGO_URI": os.getenv("MONGO_URI"),
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
         "TICKETMASTER_API_KEY": os.getenv("TICKETMASTER_API_KEY"),
-        "SELF_URL": os.getenv("SELF_URL"),
-        "EXPRESS_BACKEND_URL": os.getenv("EXPRESS_BACKEND_URL")
     }
 
     missing_vars = [var for var, value in required_vars.items() if not value]
     if missing_vars:
-        print(f"ERROR: Missing required environment variables: {', '.join(missing_vars)}")
+        print(f"Missing required environment variables: {', '.join(missing_vars)}")
         return
 
-    print("✓ All required environment variables are set")
+    print("✓ Environment variables verified")
 
     try:
         await db.command('ping')
-        print("✓ MongoDB connection successful")
+        print("✓ MongoDB connected")
     except Exception as e:
-        print(f"✗ MongoDB connection failed: {e}")
+        print(f"× MongoDB connection failed: {e}")
 
     try:
         asyncio.create_task(start_scheduler())
-        print("✓ Started Ticketmaster sync scheduler")
+        print("✓ Ticketmaster sync scheduler started")
     except Exception as e:
-        print(f"✗ Error starting scheduler: {e}")
+        print(f"× Scheduler start failed: {e}")
 
 if __name__ == "__main__":
     import uvicorn
