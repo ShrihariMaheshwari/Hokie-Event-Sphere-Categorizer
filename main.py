@@ -64,7 +64,7 @@ db = mongo_client.events_db
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 async def categorize_with_gpt(event_data: Dict[str, Any]):
-    """Categorize event using GPT-4"""
+    """Improved event categorization using GPT"""
     try:
         event_info = (
             f"Event: {event_data['title']}, "
@@ -73,23 +73,48 @@ async def categorize_with_gpt(event_data: Dict[str, Any]):
         )
 
         prompt = f"""
-        Categorize this event and improve its description if needed.
+        Analyze this event carefully and categorize it based on its type and content. 
         
-        Event Info: {event_info}
-        
-        Categories:
-        - Sports: Live Sports Events, Amateur Sports Events, Sports Meetups
-        - Movies: General Movies, Sports Movies, Documentaries
-        - Tech Events: Tech Conferences, Hackathons, Tech Meetups
-        - Social Events: Social Gatherings, Cultural Events
-        - Others: Miscellaneous Events
-        
-        Return in this format:
+        Event Information: {event_info}
+
+        Choose the most appropriate category and subcategory from these options:
+
+        1. Sports Events:
+           - Live Sports Events (for any professional or collegiate sports games)
+           - Amateur Sports Events (for recreational or amateur competitions)
+           - Sports Meetups (for sports-related gatherings)
+
+        2. Entertainment Events:
+           - Concerts & Music (for any musical performance)
+           - Theater & Drama (for plays, musicals, dramatic performances)
+           - Comedy Shows (for stand-up comedy, comedy performances)
+           - Family Entertainment (for family-friendly shows, Disney on Ice, etc.)
+
+        3. Cultural Events:
+           - Art & Exhibition (for art shows, museum exhibitions)
+           - Food & Drink (for food festivals, wine tastings)
+           - Cultural Festivals (for cultural celebrations)
+
+        4. Educational Events:
+           - Conferences (for professional conferences)
+           - Workshops (for learning sessions)
+           - Tech Events (for technology-related events)
+
+        5. Social Events:
+           - Community Gatherings
+           - Networking Events
+           - Holiday Celebrations
+
+        Also generate a compelling description if the current one is too brief.
+
+        Return ONLY a JSON object in this exact format:
         {{
             "main_category": "category name",
-            "sub_category": "subcategory name",
-            "description": "improved or existing description"
+            "sub_category": "specific subcategory name",
+            "description": "detailed event description"
         }}
+
+        The categorization should be very specific and accurate based on the event details provided.
         """
 
         # Using the new OpenAI client format
@@ -97,34 +122,107 @@ async def categorize_with_gpt(event_data: Dict[str, Any]):
             client.chat.completions.create,
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an event categorizer."},
+                {
+                    "role": "system", 
+                    "content": "You are an expert event categorizer with deep knowledge of different types of events. Provide accurate and specific categorizations."
+                },
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            temperature=0.3  # Lower temperature for more consistent categorization
         )
 
-        # Extract the response
+        # Extract and validate the response
         if response.choices and response.choices[0].message:
             try:
                 result = json.loads(response.choices[0].message.content)
-                return {
-                    "main_category": result.get("main_category", "Others"),
-                    "sub_category": result.get("sub_category", "Miscellaneous Events"),
-                    "description": result.get("description", event_data.get("description", ""))
-                }
-            except:
-                return {
-                    "main_category": "Others",
-                    "sub_category": "Miscellaneous Events",
-                    "description": event_data.get("description", "")
-                }
                 
+                # Validate main category and provide fallback if needed
+                main_categories = [
+                    "Sports Events", "Entertainment Events", "Cultural Events",
+                    "Educational Events", "Social Events"
+                ]
+                
+                if result["main_category"] not in main_categories:
+                    # Try to infer category from event title and description
+                    event_text = f"{event_data['title']} {event_data.get('description', '')}".lower()
+                    
+                    if any(word in event_text for word in ['concert', 'music', 'band', 'singer', 'performance']):
+                        result["main_category"] = "Entertainment Events"
+                        result["sub_category"] = "Concerts & Music"
+                    elif any(word in event_text for word in ['sports', 'game', 'match', 'tournament']):
+                        result["main_category"] = "Sports Events"
+                        result["sub_category"] = "Live Sports Events"
+                    elif any(word in event_text for word in ['comedy', 'standup', 'laugh']):
+                        result["main_category"] = "Entertainment Events"
+                        result["sub_category"] = "Comedy Shows"
+                    elif any(word in event_text for word in ['conference', 'tech', 'workshop']):
+                        result["main_category"] = "Educational Events"
+                        result["sub_category"] = "Conferences"
+                    else:
+                        result["main_category"] = "Entertainment Events"
+                        result["sub_category"] = "General Entertainment"
+
+                # Ensure we have a good description
+                if not result.get("description") or len(result["description"]) < 50:
+                    result["description"] = (
+                        f"Join us for {event_data['title']} at {event_data['venue']}! "
+                        f"This {result['sub_category']} event promises to be an unforgettable experience. "
+                        f"Don't miss out on this exciting {result['main_category'].lower()} gathering!"
+                    )
+
+                print(f"Categorized '{event_data['title']}' as: {result['main_category']} - {result['sub_category']}")
+                
+                return result
+                
+            except json.JSONDecodeError as json_error:
+                print(f"JSON parsing error: {json_error}")
+                return infer_category_from_title(event_data)
+                
+        return infer_category_from_title(event_data)
+
     except Exception as e:
         print(f"Error in categorization: {e}")
-        return {
-            "main_category": "Others",
-            "sub_category": "Miscellaneous Events",
-            "description": event_data.get("description", "")
-        }
+        return infer_category_from_title(event_data)
+
+def infer_category_from_title(event_data: Dict[str, Any]):
+    """Infer category from event title and description when GPT fails"""
+    title_lower = event_data['title'].lower()
+    desc_lower = event_data.get('description', '').lower()
+    combined_text = f"{title_lower} {desc_lower}"
+
+    # Keywords for different categories
+    category_keywords = {
+        "Sports Events": ['game', 'sports', 'basketball', 'football', 'baseball', 'hockey', 'match', 'tournament'],
+        "Entertainment Events": ['concert', 'music', 'show', 'performance', 'band', 'singer', 'live', 'tour'],
+        "Cultural Events": ['festival', 'art', 'exhibition', 'museum', 'cultural', 'food', 'wine'],
+        "Educational Events": ['conference', 'workshop', 'tech', 'learning', 'seminar', 'training'],
+        "Social Events": ['party', 'gathering', 'meetup', 'social', 'networking', 'celebration']
+    }
+
+    # Subcategory mappings
+    subcategory_mappings = {
+        "Sports Events": "Live Sports Events",
+        "Entertainment Events": "Concerts & Music",
+        "Cultural Events": "Cultural Festivals",
+        "Educational Events": "Conferences",
+        "Social Events": "Community Gatherings"
+    }
+
+    # Find matching category
+    for category, keywords in category_keywords.items():
+        if any(keyword in combined_text for keyword in keywords):
+            return {
+                "main_category": category,
+                "sub_category": subcategory_mappings[category],
+                "description": event_data.get('description') or f"Join us for {event_data['title']} at {event_data['venue']}!"
+            }
+
+    # Default to Entertainment Events if no match found
+    return {
+        "main_category": "Entertainment Events",
+        "sub_category": "General Entertainment",
+        "description": event_data.get('description') or f"Join us for {event_data['title']} at {event_data['venue']}!"
+    }
 
 async def process_ticketmaster_event(event: dict):
     """Process Ticketmaster event to match MongoDB schema"""
