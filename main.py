@@ -101,6 +101,8 @@ async def process_ticketmaster_event(event: dict):
             print(f"Error getting venue for event {event.get('name')}")
             venue = "Venue Not Specified"
 
+        event_identifier = f"TM-{event.get('id', '')}"
+
         # Construct event data
         processed_event = {
             'title': event['name'],
@@ -115,6 +117,7 @@ async def process_ticketmaster_event(event: dict):
             'organizerId': 'ticketmaster',
             'organizerEmail': 'events@ticketmaster.com',
             'source': 'ticketmaster',
+            'ticketmaster_id': event_identifier,
             'rsvps': []
         }
 
@@ -209,14 +212,16 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
             'createdAt': datetime.utcnow(),
             'updatedAt': datetime.utcnow()
         })
+
+        # Generate a unique identifier for the event
+        event_identifier = f"TM-{event_data.get('id', '')}"
+        processed_event['ticketmaster_id'] = event_identifier
         
         # Save to MongoDB
         try:
             result = await db.events.update_one(
                 {
-                    'title': processed_event['title'],
-                    'startDate': processed_event['startDate'],
-                    'source': 'ticketmaster'
+                    'ticketmaster_id': event_identifier  # Use ticketmaster_id instead
                 },
                 {'$set': processed_event},
                 upsert=True
