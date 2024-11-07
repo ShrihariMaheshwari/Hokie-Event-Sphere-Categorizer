@@ -146,76 +146,92 @@ async def categorize_with_gpt(event_data: Dict[str, Any]):
 async def process_ticketmaster_event(event: dict):
     """Transform Ticketmaster event data to match our schema"""
     try:
-        print(f"Processing event: {event.get('name', 'Unknown Event')}")
+        event_name = event.get('name')
+        if not event_name:
+            print("Event name is missing")
+            return None
 
-        # Extract base date and time with error handling
+        print(f"Processing event: {event_name}")
+
+        # Extract dates with better error handling
         try:
-            start_date = datetime.fromisoformat(event['dates']['start']['localDate'])
-            start_time = event['dates']['start'].get('localTime', '19:00:00')
+            dates_info = event.get('dates', {}).get('start', {})
+            if not dates_info:
+                print(f"Missing dates information for event: {event_name}")
+                return None
+
+            start_date = datetime.fromisoformat(dates_info.get('localDate', datetime.now().strftime('%Y-%m-%d')))
+            start_time = dates_info.get('localTime', '19:00:00')
             
-            end_time = event['dates'].get('end', {}).get('localTime', '')
+            end_info = event.get('dates', {}).get('end', {})
+            end_time = end_info.get('localTime', '')
             if not end_time:
-                start_datetime = datetime.strptime(start_time, '%H:%M:%S')
-                end_datetime = start_datetime + timedelta(hours=3)
-                end_time = end_datetime.strftime('%H:%M:%S')
+                try:
+                    start_datetime = datetime.strptime(start_time, '%H:%M:%S')
+                    end_datetime = start_datetime + timedelta(hours=3)
+                    end_time = end_datetime.strftime('%H:%M:%S')
+                except:
+                    end_time = '22:00:00'
 
             end_date = datetime.fromisoformat(
-                event['dates'].get('end', {}).get('localDate', event['dates']['start']['localDate'])
+                end_info.get('localDate', dates_info.get('localDate', datetime.now().strftime('%Y-%m-%d')))
             )
         except Exception as date_error:
-            print(f"Error processing dates for event {event.get('name')}: {str(date_error)}")
+            print(f"Date error for {event_name}: {str(date_error)}")
             current_time = datetime.now()
             start_date = current_time
             end_date = current_time + timedelta(hours=3)
             start_time = "19:00:00"
             end_time = "22:00:00"
 
-        # Get venue information with comprehensive error handling
+        # Venue processing with better error handling
         try:
             venue_info = event.get('_embedded', {}).get('venues', [{}])[0]
             venue = venue_info.get('name', 'Venue Not Specified')
-            venue_address = venue_info.get('address', {}).get('line1', '')
-            venue_city = venue_info.get('city', {}).get('name', '')
-            venue_state = venue_info.get('state', {}).get('name', '')
             
-            # Build address with proper formatting
-            address_parts = [p for p in [venue_address, venue_city, venue_state] if p]
+            address_parts = []
+            if venue_address := venue_info.get('address', {}).get('line1'):
+                address_parts.append(venue_address)
+            if venue_city := venue_info.get('city', {}).get('name'):
+                address_parts.append(venue_city)
+            if venue_state := venue_info.get('state', {}).get('name'):
+                address_parts.append(venue_state)
+            
             full_address = ", ".join(address_parts) if address_parts else "Address Not Available"
-            
         except Exception as venue_error:
-            print(f"Error processing venue for {event.get('name')}: {str(venue_error)}")
+            print(f"Venue error for {event_name}: {str(venue_error)}")
             venue = "Venue Not Specified"
             full_address = "Address Not Available"
 
-        # Process price information with error handling
+        # Price processing with better error handling
         try:
             registration_fee = 0
-            if event.get('priceRanges'):
-                prices = [price.get('min', 0) for price in event['priceRanges'] if price.get('min') is not None]
+            if price_ranges := event.get('priceRanges', []):
+                prices = [pr.get('min', 0) for pr in price_ranges if pr.get('min') is not None]
                 registration_fee = min(prices) if prices else 0
         except Exception as price_error:
-            print(f"Error processing price: {str(price_error)}")
+            print(f"Price error for {event_name}: {str(price_error)}")
             registration_fee = 0
 
-        # Process description with multiple fallbacks
-        base_description = (
-            event.get('description') or 
-            event.get('info') or 
-            event.get('pleaseNote') or 
+        # Description processing with better fallbacks
+        description_options = [
+            event.get('description'),
+            event.get('info'),
+            event.get('pleaseNote'),
             event.get('additionalInfo')
-        )
-        
-        if not base_description:
+        ]
+        description = next((desc for desc in description_options if desc), None)
+        if not description:
             ticket_info = "Tickets available now!" if event.get('url') else "Contact venue for more details."
-            base_description = f"Join us for {event['name']} at {venue}! Experience this exciting event live. {ticket_info}"
+            description = f"Join us for {event_name} at {venue}! Experience this exciting event live. {ticket_info}"
 
         # Generate unique identifier
         event_identifier = f"TM-{event.get('id', str(ObjectId()))}"
 
-        # Create initial event data
+        # Create event data with default categories
         event_data = {
-            'title': event['name'],
-            'description': base_description,
+            'title': event_name,
+            'description': description,
             'venue': venue,
             'startDate': start_date,
             'endDate': end_date,
@@ -228,18 +244,23 @@ async def process_ticketmaster_event(event: dict):
             'source': 'ticketmaster',
             'ticketmaster_id': event_identifier,
             'address': full_address,
-            'rsvps': []
+            'rsvps': [],
+            'main_category': 'Others',  # Default category
+            'sub_category': 'Miscellaneous Events'  # Default subcategory
         }
 
         # Get enhanced data from GPT
-        enhanced_data = await categorize_with_gpt(event_data)
-        if enhanced_data:
-            event_data.update(enhanced_data)
-        
+        try:
+            enhanced_data = await categorize_with_gpt(event_data)
+            if enhanced_data and isinstance(enhanced_data, dict):
+                event_data.update(enhanced_data)
+        except Exception as gpt_error:
+            print(f"GPT categorization error for {event_name}: {str(gpt_error)}")
+
         return event_data
 
     except Exception as e:
-        print(f"Detailed error processing Ticketmaster event: {str(e)}")
+        print(f"Detailed error processing Ticketmaster event: {type(e).__name__}: {str(e)}")
         return None
 
 @app.post("/categorize/{event_id}")
@@ -287,12 +308,15 @@ async def categorize_manual_event(event_id: str):
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
     """Endpoint for categorizing Ticketmaster events"""
     try:
+        if not event_data:
+            raise HTTPException(status_code=400, detail="No event data provided")
+
         processed_event = await process_ticketmaster_event(event_data)
         
         if not processed_event:
             error_msg = f"Failed to process event: {event_data.get('name', 'Unknown Event')}"
             print(error_msg)
-            raise HTTPException(status_code=400, detail=error_msg)
+            return None  # Return None instead of raising an exception
 
         # Add timestamps
         current_time = datetime.utcnow()
@@ -317,19 +341,17 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
                 result = await db.events.insert_one(processed_event)
                 processed_event['_id'] = str(result.inserted_id)
             
-            print(f"Successfully processed event: {processed_event['title']}")
+            print(f"Successfully saved event: {processed_event['title']}")
             return processed_event
 
         except Exception as db_error:
-            print(f"Database Error for {processed_event['title']}: {str(db_error)}")
-            raise HTTPException(status_code=500, detail=f"Database error: {str(db_error)}")
+            print(f"Database Error for {processed_event.get('title', 'Unknown Event')}: {str(db_error)}")
+            return None  # Return None instead of raising an exception
 
-    except HTTPException:
-        raise
     except Exception as e:
-        error_msg = f"Unexpected error in categorize_ticketmaster_event: {str(e)}"
+        error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
         print(error_msg)
-        raise HTTPException(status_code=500, detail=error_msg)
+        return None
 
 @app.get("/")
 async def root():
