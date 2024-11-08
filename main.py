@@ -188,6 +188,40 @@ def infer_category_from_title(event_data: Dict[str, Any]):
         "description": event_data.get('description') or f"Join us for {event_data['title']} at {event_data['venue']}!"
     }
 
+async def is_duplicate_event(db, event_data: Dict[str, Any]) -> bool:
+    """
+    Check if an event already exists in the database.
+    Returns True if it's a duplicate, False otherwise.
+    """
+
+    #Get the ticketmaster id if available
+    tickemaster_id = event_data.get('id')
+
+    # Check for existing event with same Ticketmaster ID
+    if tickemaster_id:
+        existing_event = await db.events.find_one({
+            "tickemaster_id":   tickemaster_id 
+        })
+        if existing_event:
+            return True
+        
+    # If no Ticketmaster ID or not found, check for similar events by title and date
+    title = event_data.get('title')
+    start_date = event_data.get('startDate')
+    venue = event_data.get('venue')
+
+    if title and start_date and venue:
+        # Check for events with same title, date, and venue
+        existing_event = await db.events.find_one({
+            "title": title,
+            "startDate": start_date,
+            "venue": venue
+        })
+        if existing_event:
+            return True
+    
+    return False
+
 async def process_ticketmaster_event(event: dict):
     """Process Ticketmaster event to match MongoDB schema"""
     try:
@@ -199,7 +233,8 @@ async def process_ticketmaster_event(event: dict):
             'organizerEmail': 'events@ticketmaster.com',
             'description': event.get('description', ''),
             'imageUrl': event.get('images', [{'url': None}])[0].get('url', None),
-            'rsvps': []
+            'rsvps': [],
+            'ticketmaster_id': event.get('id') # Add Ticketmaster ID for deduplication
         }
 
         # Handle dates
@@ -252,6 +287,12 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
         processed_event = await process_ticketmaster_event(event_data)
         
         if not processed_event:
+            return None
+        
+        # Check for duplicates before saving
+        is_duplicate = await is_duplicate_event(db, processed_event)
+        if is_duplicate:
+            print(f"Skipping duplicate event: {processed_event['title']}")
             return None
 
         # Add timestamps
@@ -359,6 +400,15 @@ async def startup_event():
     try:
         await db.command('ping')
         print("✓ MongoDB connected")
+
+        # Create indexes for efficient duplicate checking
+        await db.events.create_index("ticketmaster_id", sparse=True)
+        await db.events.create_index([
+            ("title", 1),
+            ("startDate", 1),
+            ("venue", 1)
+        ])
+        print("✓ Database indexes created")
     except Exception as e:
         print(f"× MongoDB connection failed: {e}")
 
