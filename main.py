@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import openai
 import os
@@ -194,33 +194,37 @@ async def is_duplicate_event(db, event_data: Dict[str, Any]) -> bool:
     Returns True if it's a duplicate, False otherwise.
     """
 
-    #Get the ticketmaster id if available
-    tickemaster_id = event_data.get('id')
+    try:
+        #Get the ticketmaster id if available
+        ticketmaster_id = event_data.get('id')
 
-    # Check for existing event with same Ticketmaster ID
-    if tickemaster_id:
-        existing_event = await db.events.find_one({
-            "tickemaster_id":   tickemaster_id 
-        })
-        if existing_event:
-            return True
-        
-    # If no Ticketmaster ID or not found, check for similar events by title and date
-    title = event_data.get('title')
-    start_date = event_data.get('startDate')
-    venue = event_data.get('venue')
+        # Check for existing event with same Ticketmaster ID
+        if ticketmaster_id:
+            existing_event = await db.events.find_one({
+                "ticketmaster_id":   ticketmaster_id 
+            })
+            if existing_event:
+                print(f"[{datetime.now()}] Duplicate found by ticketmaster_id: {ticketmaster_id}")
+                return True
+            
+        # If no Ticketmaster ID or not found, check for similar events by title and date
+        title = event_data.get('title')
+        start_date = event_data.get('startDate')
+        venue = event_data.get('venue')
 
-    if title and start_date and venue:
-        # Check for events with same title, date, and venue
-        existing_event = await db.events.find_one({
-            "title": title,
-            "startDate": start_date,
-            "venue": venue
-        })
-        if existing_event:
-            return True
-    
-    return False
+        if all([title, start_date, venue]):
+                existing_event = await db.events.find_one({
+                    "title": title,
+                    "startDate": start_date,
+                    "venue": venue
+                })
+                if existing_event:
+                    print(f"[{datetime.now()}] Duplicate found by title/date/venue: {title}")
+                    return True
+        return False
+    except Exception as e:
+        print(f"[{datetime.now()}] Error checking for duplicates: {e}")
+        return False
 
 async def process_ticketmaster_event(event: dict):
     """Process Ticketmaster event to match MongoDB schema"""
@@ -283,16 +287,20 @@ async def process_ticketmaster_event(event: dict):
 @app.post("/categorize/ticketmaster")
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
     """Endpoint for categorizing Ticketmaster events"""
+    processing_start = datetime.now()
+    print(f"[{processing_start}] Starting to process event: {event_data.get('name', 'Unknown')}")
+
     try:
         processed_event = await process_ticketmaster_event(event_data)
         
         if not processed_event:
+            print(f"[{datetime.now()}] Failed to process event: {event_data.get('name', 'Unknown')}")
             return None
         
         # Check for duplicates before saving
         is_duplicate = await is_duplicate_event(db, processed_event)
         if is_duplicate:
-            print(f"Skipping duplicate event: {processed_event['title']}")
+            print(f"[{datetime.now()}] Skipping duplicate event: {processed_event['title']}")
             return None
 
         # Add timestamps
@@ -304,14 +312,17 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
         try:
             result = await db.events.insert_one(processed_event)
             processed_event['_id'] = str(result.inserted_id)
-            print(f"Successfully saved: {processed_event['title']}")
+            processing_end = datetime.now()
+            processing_duration = (processing_end - processing_start).total_seconds()
+            print(f"[{processing_end}] Successfully saved new event: {processed_event['title']} (Duration: {processing_duration}s)")
             return processed_event
+        
         except Exception as db_error:
-            print(f"Database error: {db_error}")
+            print(f"[{datetime.now()}] Database error: {db_error}")
             return None
 
     except Exception as e:
-        print(f"Processing error: {e}")
+        print(f"[{datetime.now()}] Processing error: {e}")
         return None
 
 
