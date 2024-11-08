@@ -4,7 +4,7 @@ import aiohttp
 import asyncio
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 import motor.motor_asyncio
 import sys
 
