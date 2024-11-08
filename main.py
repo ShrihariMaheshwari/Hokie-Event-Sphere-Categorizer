@@ -428,7 +428,3 @@ async def startup_event():
         print("✓ Ticketmaster sync scheduler started")
     except Exception as e:
         print(f"× Scheduler start failed: {e}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

@@ -4,9 +4,8 @@ import aiohttp
 import asyncio
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import motor.motor_asyncio
-import sys
 
 class TicketmasterSync:
     def __init__(self):
@@ -19,6 +18,8 @@ class TicketmasterSync:
         self.self_url = os.getenv("SELF_URL")
         self.timeout = aiohttp.ClientTimeout(total=30)
         self.is_syncing = False
+        self.scheduler = None
+        self.next_sync_time = None
 
     async def fetch_events(self) -> List[Dict[str, Any]]:
         if not self.ticketmaster_key:
@@ -122,7 +123,6 @@ class TicketmasterSync:
             
             successful_syncs = 0
             failed_syncs = 0
-            skipped_events = 0
 
             batch_size = 10
             for i in range(0, len(events), batch_size):
@@ -144,6 +144,9 @@ class TicketmasterSync:
             sync_end_time = datetime.now()
             sync_duration = (sync_end_time - sync_start_time).total_seconds()
             
+            # Calculate next sync time
+            self.next_sync_time = datetime.now() + timedelta(hours=12)
+            
             print(f"""
 [{sync_end_time}] Ticketmaster sync completed:
 - Duration: {sync_duration:.2f} seconds
@@ -151,6 +154,7 @@ class TicketmasterSync:
 - Successfully processed: {successful_syncs}
 - Failed to process: {failed_syncs}
 - Batches processed: {(len(events) + batch_size - 1)//batch_size}
+- Next sync scheduled for: {self.next_sync_time}
             """)
             
         except Exception as e:
@@ -158,53 +162,35 @@ class TicketmasterSync:
         finally:
             self.is_syncing = False
 
-class SchedulerService:
-    def __init__(self):
-        self.scheduler = AsyncIOScheduler()
-        self.sync_service = TicketmasterSync()
-
-    async def run_sync(self):
-        """Run a single sync and exit"""
-        try:
-            await self.sync_service.sync()
-            print(f"[{datetime.now()}] Initial sync completed. Service will restart in 12 hours.")
-            # Exit the process after completion
-            sys.exit(0)
-        except Exception as e:
-            print(f"[{datetime.now()}] Error in sync: {str(e)}")
-            sys.exit(1)
-
-    async def start_scheduled_sync(self):
-        """Start the scheduler for periodic syncs"""
-        try:
-            # Schedule the job to run every 12 hours
+    def start_scheduler(self):
+        """Initialize the scheduler"""
+        if self.scheduler is None:
+            self.scheduler = AsyncIOScheduler()
             self.scheduler.add_job(
-                self.sync_service.sync,
+                self.sync,
                 'interval',
                 hours=12,
                 timezone=pytz.UTC,
                 max_instances=1,
                 coalesce=True
             )
-            
             self.scheduler.start()
-            print(f"[{datetime.now()}] Scheduler started. Will sync every 12 hours.")
-            
-            # Run the first sync immediately
-            await self.run_sync()
-            
-        except Exception as e:
-            print(f"[{datetime.now()}] Scheduler error: {str(e)}")
-            sys.exit(1)
+            print(f"[{datetime.now()}] Ticketmaster sync scheduler initialized")
 
 async def start_scheduler():
-    """Initialize and start the scheduler"""
-    scheduler_service = SchedulerService()
-    await scheduler_service.start_scheduled_sync()
+    """Initialize and start the Ticketmaster sync scheduler"""
+    sync_service = TicketmasterSync()
+    
+    # Start the scheduler first
+    sync_service.start_scheduler()
+    
+    # Run initial sync
+    print(f"[{datetime.now()}] Running initial sync")
+    await sync_service.sync()
+    
+    # Keep the scheduler instance alive
+    return sync_service
 
+# Optional: If you want to run this file directly for testing
 if __name__ == "__main__":
-    try:
-        asyncio.run(start_scheduler())
-    except KeyboardInterrupt:
-        print(f"[{datetime.now()}] Service stopped by user")
-        sys.exit(0)
+    asyncio.run(start_scheduler())
