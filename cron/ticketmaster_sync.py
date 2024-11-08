@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import motor.motor_asyncio
+import json
 
 class TicketmasterSync:
     def __init__(self):
@@ -47,6 +48,20 @@ class TicketmasterSync:
                     if response.status == 200:
                         data = await response.json()
                         events = data.get('_embedded', {}).get('events', [])
+                        # Debug: Print first event's venue data
+                        if events:
+                            first_event = events[0]
+                            venue_data = first_event.get('_embedded', {}).get('venues', [{}])[0]
+                            print("\nFirst event venue data from Ticketmaster:")
+                            print(json.dumps({
+                                'name': venue_data.get('name'),
+                                'address': venue_data.get('address'),
+                                'city': venue_data.get('city'),
+                                'state': venue_data.get('state'),
+                                'postalCode': venue_data.get('postalCode'),
+                                'location': venue_data.get('location')
+                            }, indent=2))
+                        
                         print(f"[{datetime.now()}] Found {len(events)} events in Ticketmaster response")
                         return events
                     else:

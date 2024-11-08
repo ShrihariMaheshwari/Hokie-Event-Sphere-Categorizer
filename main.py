@@ -232,6 +232,15 @@ async def process_ticketmaster_event(event: dict):
 
         # Get venue details for location
         venue = event.get('_embedded', {}).get('venues', [{}])[0]
+        print("\nProcessing venue data:")
+        print(json.dumps({
+            'name': venue.get('name'),
+            'address': venue.get('address'),
+            'city': venue.get('city'),
+            'state': venue.get('state'),
+            'postalCode': venue.get('postalCode'),
+            'location': venue.get('location')
+        }, indent=2))
 
         # Extract location data
         location = {
@@ -244,6 +253,10 @@ async def process_ticketmaster_event(event: dict):
                 'longitude': float(venue.get('location', {}).get('longitude', 0)) if venue.get('location', {}).get('longitude') else 0
             }
         }
+
+        # Debug: Print extracted location
+        print("\nExtracted location data:")
+        print(json.dumps(location, indent=2))
 
         # Basic event data
         event_data = {
@@ -295,6 +308,13 @@ async def process_ticketmaster_event(event: dict):
         enhanced_data = await categorize_with_gpt(event_data)
         event_data.update(enhanced_data)
 
+        print("\nFinal event data location before saving:")
+        print(json.dumps({
+            'title': event_data['title'],
+            'venue': event_data['venue'],
+            'location': event_data['location']
+        }, indent=2))
+
         return event_data
 
     except Exception as e:
@@ -314,6 +334,13 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
             print(f"[{datetime.now()}] Failed to process event: {event_data.get('name', 'Unknown')}")
             return None
         
+        # Debug: Print location data before save
+        print("\nLocation data before saving to MongoDB:")
+        print(json.dumps({
+            'title': processed_event['title'],
+            'location': processed_event.get('location')
+        }, indent=2))
+        
         # Check for duplicates before saving
         is_duplicate = await is_duplicate_event(db, processed_event)
         if is_duplicate:
@@ -332,6 +359,14 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
             processing_end = datetime.now()
             processing_duration = (processing_end - processing_start).total_seconds()
             print(f"[{processing_end}] Successfully saved new event: {processed_event['title']} (Duration: {processing_duration}s)")
+
+            if result.inserted_id:
+                saved_event = await db.events.find_one({'_id': result.inserted_id})
+                print("\nVerifying saved location data:")
+                print(json.dumps({
+                    'title': saved_event['title'],
+                    'location': saved_event.get('location')
+                }, indent=2))
             return processed_event
         
         except Exception as db_error:

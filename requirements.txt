@@ -41,3 +41,4 @@ tzlocal==5.2
 urllib3==1.26.20
 uvicorn==0.15.0
 yarl==1.17.1
+json
