@@ -229,6 +229,22 @@ async def is_duplicate_event(db, event_data: Dict[str, Any]) -> bool:
 async def process_ticketmaster_event(event: dict):
     """Process Ticketmaster event to match MongoDB schema"""
     try:
+
+        # Get venue details for location
+        venue = event.get('_embedded', {}).get('venues', [{}])[0]
+
+        # Extract location data
+        location = {
+            'address': venue.get('address', {}).get('line1', ''),
+            'city': venue.get('city', {}).get('name', ''),
+            'state': venue.get('state', {}).get('stateCode', ''),
+            'postalCode': venue.get('postalCode', ''),
+            'coordinates': {
+                'latitude': float(venue.get('location', {}).get('latitude', 0)) if venue.get('location', {}).get('latitude') else 0,
+                'longitude': float(venue.get('location', {}).get('longitude', 0)) if venue.get('location', {}).get('longitude') else 0
+            }
+        }
+
         # Basic event data
         event_data = {
             'title': event.get('name', ''),
@@ -238,7 +254,8 @@ async def process_ticketmaster_event(event: dict):
             'description': event.get('description', ''),
             'imageUrl': event.get('images', [{'url': None}])[0].get('url', None),
             'rsvps': [],
-            'ticketmaster_id': event.get('id') # Add Ticketmaster ID for deduplication
+            'ticketmaster_id': event.get('id'), # Add Ticketmaster ID for deduplication
+            'location': location
         }
 
         # Handle dates
