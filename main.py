@@ -2,42 +2,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import openai
 import os
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
-import motor.motor_asyncio
-import asyncio
-from bson import ObjectId
-from cron.ticketmaster_sync import start_scheduler
-import json
-
-app = FastAPI(title="Hokie Event Categorizer")
-
-# CORS setup
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[os.getenv("EXPRESS_BACKEND_URL", "*")],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# MongoDB setup
-mongo_client = motor.motor_asyncio.AsyncIOMotorClient(os.getenv("MONGO_URI"))
-db = mongo_client.events_db
-
-# OpenAI setup
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-def format_datetime(dt):
-    """Format datetime object to string"""
-    if isinstance(dt, datetime):
-        return dt.isoformat()
-    return str(dt)
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import openai
-import os
 from typing import Dict, Any
 from datetime import datetime, timedelta
 import motor.motor_asyncio
