@@ -588,6 +588,36 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     c = 2 * math.asin(math.sqrt(a))
     return R * c
 
+def get_recommendation_reasoning(score_breakdown: Dict[str, float]) -> str:
+    """Generate explanation for recommendation scores"""
+    reasons = []
+    
+    if score_breakdown["location"] > 0.8:
+        reasons.append("Very close to your location")
+    elif score_breakdown["location"] > 0.5:
+        reasons.append("Relatively nearby")
+        
+    if score_breakdown["category"] > 0.7:
+        reasons.append("Strongly matches your interests")
+    elif score_breakdown["category"] > 0:
+        reasons.append("Similar to events you've clicked")
+        
+    if score_breakdown["price"] == 1.0:
+        reasons.append("Free event")
+    elif score_breakdown["price"] > 0.8:
+        reasons.append("Within your usual price range")
+        
+    if score_breakdown["rsvp"] > 0.7:
+        reasons.append("Similar to events you've attended")
+        
+    if score_breakdown["interests"] > 0.5:
+        reasons.append("Matches your profile interests")
+        
+    if not reasons:
+        reasons.append("New event that might interest you")
+        
+    return "; ".join(reasons)
+
 # Custom JSON encoder for MongoDB ObjectId
 class CustomJSONEncoder:
     @staticmethod
@@ -635,41 +665,39 @@ async def get_recommendations(
         )
 
         # Process recommendations to make them JSON serializable
-        processed_response = {
-            "recommendations": [],
-            "scores": []
-        }
+        simplified_recommendations = []
 
         for rec in recommendations:
-            # Convert MongoDB document to plain dict and handle special types
-            processed_event = CustomJSONEncoder.encode_event(rec["event"])
-            
-            # Store processed event and scores separately
-            processed_response["recommendations"].append(processed_event)
-            processed_response["scores"].append({
-                "score": float(rec["score"]),  # Ensure score is a float
-                "breakdown": {
-                    k: float(v) for k, v in rec["score_breakdown"].items()  # Convert all scores to float
-                }
-            })
+            event = rec["event"]
+            simplified_rec = {
+                "title": event["title"],
+                "date": event["startDate"].strftime("%Y-%m-%d"),  # Add date to differentiate similar events
+                "time": event["startTime"],
+                "score": round(float(rec["score"]), 3),  # Round to 3 decimal places
+                "score_breakdown": {
+                    k: round(float(v), 3) for k, v in rec["score_breakdown"].items()
+                },
+                "reasoning": get_recommendation_reasoning(rec["score_breakdown"])  # Add reasoning
+            }
+            simplified_recommendations.append(simplified_rec)
 
             # Debug logging
-            print(f"\nProcessed event: {processed_event['title']}")
-            print(f"Score: {rec['score']:.3f}")
+            print(f"\nProcessed recommendation:")
+            print(f"Title: {simplified_rec['title']} ({simplified_rec['date']})")
+            print(f"Score: {simplified_rec['score']}")
             print("Score Breakdown:")
-            for category, score in rec["score_breakdown"].items():
-                print(f"- {category}: {score:.3f}")
+            for category, score in simplified_rec['score_breakdown'].items():
+                print(f"- {category}: {score}")
 
-        return processed_response        
+        return {
+            "success": True,
+            "recommendations": simplified_recommendations
+        }      
 
     except Exception as e:
         print(f"Error in recommendations endpoint: {str(e)}")
-        import traceback
-        print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing recommendations: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
+    
 @app.post("/categorize/ticketmaster")
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
     """Endpoint for categorizing Ticketmaster events"""
