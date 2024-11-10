@@ -621,6 +621,8 @@ async def get_recommendations(
 ):
     """Get personalized event recommendations"""
     try:
+        print(f"\nStarting recommendation calculation for user: {user_email}")
+        
         user_location = {
             "coordinates": {
                 "latitude": latitude,
@@ -628,6 +630,7 @@ async def get_recommendations(
             }
         } if latitude and longitude else {}
 
+        # Get recommendations
         recommendations = await calculate_event_recommendations(
             db,
             user_id,
@@ -636,29 +639,58 @@ async def get_recommendations(
             limit
         )
 
-        # Process recommendations to make them JSON serializable
-        simplified_recommendations = []
+        # Ensure we have recommendations
+        if not recommendations:
+            print("No recommendations found")
+            return {
+                "recommendations": [],
+                "message": "No recommendations found for the given criteria"
+            }
 
+        # Process recommendations
+        simplified_recs = []
         for rec in recommendations:
-            simplified_recommendations.append({
-                "title": rec["event"]["title"],
-                "venue": rec["event"]["venue"],
-                "date": rec["event"]["startDate"].isoformat().split('T')[0],
-                "score": {
-                    "total": round(rec["score"], 3),
-                    "breakdown": {
-                        k: round(v, 3) for k, v in rec["score_breakdown"].items()
+            try:
+                event = rec["event"]
+                score = rec["score"]
+                score_breakdown = rec["score_breakdown"]
+
+                simplified_recs.append({
+                    "title": event.get("title", ""),
+                    "venue": event.get("venue", ""),
+                    "date": event.get("startDate", "").isoformat().split('T')[0],
+                    "score": {
+                        "total": round(float(score), 3),
+                        "breakdown": {
+                            k: round(float(v), 3) 
+                            for k, v in score_breakdown.items()
+                        }
                     }
-                }
-            })
+                })
+            except Exception as e:
+                print(f"Error processing recommendation: {str(e)}")
+                continue
+
+        print(f"Processed {len(simplified_recs)} recommendations")
+        
+        # Print first few recommendations for debugging
+        for i, rec in enumerate(simplified_recs[:3], 1):
+            print(f"\nRecommendation {i}:")
+            print(f"Title: {rec['title']}")
+            print(f"Score: {rec['score']['total']}")
 
         return {
-            "recommendations": simplified_recommendations
+            "recommendations": simplified_recs
         }
-    
+
     except Exception as e:
         print(f"Error in recommendations endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing recommendations: {str(e)}"
+        )
     
 @app.post("/categorize/ticketmaster")
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
