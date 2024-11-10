@@ -593,33 +593,21 @@ class CustomJSONEncoder:
     @staticmethod
     def encode_event(event: Dict[str, Any]) -> Dict[str, Any]:
         """Convert MongoDB document to JSON-serializable format"""
-        event_copy = dict(event)
-        
-        # Convert ObjectId to string
-        if '_id' in event_copy:
-            event_copy['_id'] = str(event_copy['_id'])
-            
-        # Convert organizerId if it's ObjectId
-        if 'organizerId' in event_copy and isinstance(event_copy['organizerId'], ObjectId):
-            event_copy['organizerId'] = str(event_copy['organizerId'])
-            
-        # Convert dates to ISO format strings
-        if 'startDate' in event_copy:
-            event_copy['startDate'] = event_copy['startDate'].isoformat()
-        if 'endDate' in event_copy:
-            event_copy['endDate'] = event_copy['endDate'].isoformat()
-        if 'createdAt' in event_copy:
-            event_copy['createdAt'] = event_copy['createdAt'].isoformat()
-        if 'updatedAt' in event_copy:
-            event_copy['updatedAt'] = event_copy['updatedAt'].isoformat()
-            
-        # Handle RSVP dates
-        if 'rsvps' in event_copy:
-            for rsvp in event_copy['rsvps']:
-                if 'createdAt' in rsvp:
-                    rsvp['createdAt'] = rsvp['createdAt'].isoformat()
-                    
-        return event_copy
+        def convert_value(v):
+            if isinstance(v, ObjectId):
+                return str(v)
+            elif isinstance(v, datetime):
+                return v.isoformat()
+            elif isinstance(v, dict):
+                return {k: convert_value(val) for k, val in v.items()}
+            elif isinstance(v, list):
+                return [convert_value(item) for item in v]
+            return v
+
+        if not isinstance(event, dict):
+            event = dict(event)
+
+        return {k: convert_value(v) for k, v in event.items()}
 
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(
@@ -646,37 +634,42 @@ async def get_recommendations(
             limit
         )
 
-        # Convert recommendations to JSON-serializable format
-        processed_recommendations = []
-        for rec in recommendations:
-            processed_event = CustomJSONEncoder.encode_event(rec["event"])
-            processed_recommendations.append({
-                "event": processed_event,
-                "score": rec["score"],
-                "score_breakdown": rec["score_breakdown"]
-            })
-
-        # Print debug info for top recommendations
-        for i, rec in enumerate(processed_recommendations[:3], 1):
-            print(f"\nTop Recommendation {i}:")
-            print(f"Title: {rec['event']['title']}")
-            print(f"Final Score: {rec['score']:.3f}")
-            print("Score Breakdown:")
-            for category, score in rec['score_breakdown'].items():
-                print(f"- {category}: {score:.3f}")
-
-        return {
-            "recommendations": [r["event"] for r in processed_recommendations],
-            "scores": [{
-                "score": r["score"],
-                "breakdown": r["score_breakdown"]
-            } for r in processed_recommendations]
+        # Process recommendations to make them JSON serializable
+        processed_response = {
+            "recommendations": [],
+            "scores": []
         }
 
-    except Exception as e:
-        print(f"Error in recommendations endpoint: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        for rec in recommendations:
+            # Convert MongoDB document to plain dict and handle special types
+            processed_event = CustomJSONEncoder.encode_event(rec["event"])
+            
+            # Store processed event and scores separately
+            processed_response["recommendations"].append(processed_event)
+            processed_response["scores"].append({
+                "score": float(rec["score"]),  # Ensure score is a float
+                "breakdown": {
+                    k: float(v) for k, v in rec["score_breakdown"].items()  # Convert all scores to float
+                }
+            })
 
+            # Debug logging
+            print(f"\nProcessed event: {processed_event['title']}")
+            print(f"Score: {rec['score']:.3f}")
+            print("Score Breakdown:")
+            for category, score in rec["score_breakdown"].items():
+                print(f"- {category}: {score:.3f}")
+
+        return processed_response        
+
+    except Exception as e:
+        print(f"Error in recommendations endpoint: {str(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing recommendations: {str(e)}"
+        )
 @app.post("/categorize/ticketmaster")
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
     """Endpoint for categorizing Ticketmaster events"""
