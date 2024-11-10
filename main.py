@@ -588,29 +588,6 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     c = 2 * math.asin(math.sqrt(a))
     return R * c
 
-
-
-# Custom JSON encoder for MongoDB ObjectId
-class CustomJSONEncoder:
-    @staticmethod
-    def encode_event(event: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert MongoDB document to JSON-serializable format"""
-        def convert_value(v):
-            if isinstance(v, ObjectId):
-                return str(v)
-            elif isinstance(v, datetime):
-                return v.isoformat()
-            elif isinstance(v, dict):
-                return {k: convert_value(val) for k, val in v.items()}
-            elif isinstance(v, list):
-                return [convert_value(item) for item in v]
-            return v
-
-        if not isinstance(event, dict):
-            event = dict(event)
-
-        return {k: convert_value(v) for k, v in event.items()}
-
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(
     user_id: str,
@@ -639,48 +616,43 @@ async def get_recommendations(
             limit
         )
 
-        # Ensure we have recommendations
-        if not recommendations:
-            print("No recommendations found")
-            return {
-                "recommendations": [],
-                "message": "No recommendations found for the given criteria"
-            }
-
         # Process recommendations
-        simplified_recs = []
+        processed_recs = []
         for rec in recommendations:
             try:
                 event = rec["event"]
-                score = rec["score"]
-                score_breakdown = rec["score_breakdown"]
-
-                simplified_recs.append({
-                    "title": event.get("title", ""),
-                    "venue": event.get("venue", ""),
-                    "date": event.get("startDate", "").isoformat().split('T')[0],
+                if not event.get("startDate"):
+                    continue
+                    
+                processed_recs.append({
+                    "title": str(event.get("title", "")),
+                    "venue": str(event.get("venue", "")),
+                    "date": event["startDate"].strftime("%Y-%m-%d"),
                     "score": {
-                        "total": round(float(score), 3),
+                        "total": round(float(rec["score"]), 3),
                         "breakdown": {
-                            k: round(float(v), 3) 
-                            for k, v in score_breakdown.items()
+                            "category": round(float(rec["score_breakdown"]["category"]), 3),
+                            "rsvp": round(float(rec["score_breakdown"]["rsvp"]), 3),
+                            "location": round(float(rec["score_breakdown"]["location"]), 3),
+                            "interests": round(float(rec["score_breakdown"]["interests"]), 3),
+                            "price": round(float(rec["score_breakdown"]["price"]), 3)
                         }
                     }
                 })
             except Exception as e:
-                print(f"Error processing recommendation: {str(e)}")
+                print(f"Error processing individual recommendation: {str(e)}")
                 continue
 
-        print(f"Processed {len(simplified_recs)} recommendations")
+        print(f"Processed {len(processed_recs)} recommendations")
         
-        # Print first few recommendations for debugging
-        for i, rec in enumerate(simplified_recs[:3], 1):
+        # Print debug info
+        for i, rec in enumerate(processed_recs[:3], 1):
             print(f"\nRecommendation {i}:")
             print(f"Title: {rec['title']}")
             print(f"Score: {rec['score']['total']}")
 
         return {
-            "recommendations": simplified_recs
+            "recommendations": processed_recs
         }
 
     except Exception as e:
@@ -689,7 +661,7 @@ async def get_recommendations(
         print(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=500, 
-            detail=f"Error processing recommendations: {str(e)}"
+            detail=str(e)
         )
     
 @app.post("/categorize/ticketmaster")
