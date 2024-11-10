@@ -1,14 +1,17 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HttpException
 from fastapi.middleware.cors import CORSMiddleware
 import openai
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime, timedelta
 import motor.motor_asyncio
 import asyncio
 from bson import ObjectId
 from cron.ticketmaster_sync import start_scheduler
 import json
+import math
+from collections import defaultdict
+
 
 app = FastAPI(title="Hokie Event Categorizer")
 
@@ -232,15 +235,15 @@ async def process_ticketmaster_event(event: dict):
 
         # Get venue details for location
         venue = event.get('_embedded', {}).get('venues', [{}])[0]
-        print("\nProcessing venue data:")
-        print(json.dumps({
-            'name': venue.get('name'),
-            'address': venue.get('address'),
-            'city': venue.get('city'),
-            'state': venue.get('state'),
-            'postalCode': venue.get('postalCode'),
-            'location': venue.get('location')
-        }, indent=2))
+        # print("\nProcessing venue data:")
+        # print(json.dumps({
+        #     'name': venue.get('name'),
+        #     'address': venue.get('address'),
+        #     'city': venue.get('city'),
+        #     'state': venue.get('state'),
+        #     'postalCode': venue.get('postalCode'),
+        #     'location': venue.get('location')
+        # }, indent=2))
 
         # Extract location data
         location = {
@@ -254,9 +257,9 @@ async def process_ticketmaster_event(event: dict):
             }
         }
 
-        # Debug: Print extracted location
-        print("\nExtracted location data:")
-        print(json.dumps(location, indent=2))
+        # # Debug: Print extracted location
+        # print("\nExtracted location data:")
+        # print(json.dumps(location, indent=2))
 
         # Basic event data
         event_data = {
@@ -308,18 +311,319 @@ async def process_ticketmaster_event(event: dict):
         enhanced_data = await categorize_with_gpt(event_data)
         event_data.update(enhanced_data)
 
-        print("\nFinal event data location before saving:")
-        print(json.dumps({
-            'title': event_data['title'],
-            'venue': event_data['venue'],
-            'location': event_data['location']
-        }, indent=2))
+        # print("\nFinal event data location before saving:")
+        # print(json.dumps({
+        #     'title': event_data['title'],
+        #     'venue': event_data['venue'],
+        #     'location': event_data['location']
+        # }, indent=2))
 
         return event_data
 
     except Exception as e:
         print(f"Error processing event {event.get('name', 'Unknown')}: {e}")
         return None
+    
+
+async def calculate_event_recommendations(
+    db,
+    user_id: str,
+    user_email: str,
+    user_location: Dict[str, Any],
+    limit: int = 10
+) -> List[Dict[str, Any]]:
+    """Calculate personalized event recommendations"""
+    
+    try:
+        # Get user profile and preferences
+        user_profile = await db.userprofiles.find_one({"_id": ObjectId(user_id)})
+        if not user_profile:
+            raise HttpException(status_code=404, detail="User profile not found")
+
+        # Get user's click history
+        click_history = await db.clickcounts.find({
+            "userId": user_id
+        }).to_list(None)
+
+        # Get user's RSVP history
+        rsvp_history = await db.events.find({
+            "rsvps.email": user_email
+        }).to_list(None)
+
+        # Calculate category preferences from clicks
+        category_weights = defaultdict(float)
+        subcategory_weights = defaultdict(float)
+        total_clicks = 0
+
+        for click in click_history:
+            category_weights[click["category"]] += click["categoryCount"]
+            total_clicks += click["categoryCount"]
+            for sub in click["subCategories"]:
+                subcategory_weights[sub["subCategory"]] += sub["subCategoryCount"]
+
+        # Normalize weights
+        if total_clicks > 0:
+            category_weights = {k: v/total_clicks for k, v in category_weights.items()}
+            subcategory_weights = {k: v/total_clicks for k, v in subcategory_weights.items()}
+
+        # Analyze RSVP patterns
+        rsvp_patterns = analyze_rsvp_patterns(rsvp_history)
+
+        # Get future events
+        current_date = datetime.utcnow()
+        future_events = await db.events.find({
+            "startDate": {"$gte": current_date}
+        }).to_list(None)
+
+        # Score and rank events
+        scored_events = []
+        for event in future_events:
+            scores = {
+                "category": calculate_category_score(
+                    event, 
+                    category_weights, 
+                    subcategory_weights
+                ),
+                "rsvp": calculate_rsvp_similarity(
+                    event, 
+                    rsvp_patterns
+                ),
+                "location": calculate_location_score(
+                    event, 
+                    user_location
+                ),
+                "interests": calculate_interest_match(
+                    event, 
+                    user_profile.get("interests", [])
+                ),
+                "price": calculate_price_compatibility(
+                    event, 
+                    rsvp_patterns["price_range"]
+                )
+            }
+
+            # Calculate final weighted score
+            final_score = (
+                scores["category"] * 0.30 +
+                scores["rsvp"] * 0.25 +
+                scores["location"] * 0.20 +
+                scores["interests"] * 0.15 +
+                scores["price"] * 0.10
+            )
+
+            scored_events.append({
+                "event": event,
+                "score": final_score,
+                "score_breakdown": scores
+            })
+
+        # Sort by score and return top events
+        scored_events.sort(key=lambda x: x["score"], reverse=True)
+        return scored_events[:limit]
+
+    except Exception as e:
+        print(f"Error calculating recommendations: {e}")
+        raise HttpException(status_code=500, detail=str(e))
+    
+def analyze_rsvp_patterns(rsvp_history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Analyze user's RSVP patterns"""
+    
+    patterns = {
+        "categories": defaultdict(int),
+        "subcategories": defaultdict(int),
+        "price_range": {
+            "min": float('inf'),
+            "max": 0,
+            "avg": 0
+        },
+        "venues": defaultdict(int),
+        "total_rsvps": len(rsvp_history)
+    }
+
+    total_price = 0
+    price_count = 0
+
+    for event in rsvp_history:
+        # Category preferences
+        patterns["categories"][event["main_category"]] += 1
+        patterns["subcategories"][event["sub_category"]] += 1
+        
+        # Venue preferences
+        patterns["venues"][event["venue"]] += 1
+        
+        # Price analysis
+        if event.get("registrationFee", 0) > 0:
+            price = event["registrationFee"]
+            patterns["price_range"]["min"] = min(patterns["price_range"]["min"], price)
+            patterns["price_range"]["max"] = max(patterns["price_range"]["max"], price)
+            total_price += price
+            price_count += 1
+
+    # Calculate average price
+    if price_count > 0:
+        patterns["price_range"]["avg"] = total_price / price_count
+    elif patterns["price_range"]["min"] == float('inf'):
+        patterns["price_range"]["min"] = 0
+        patterns["price_range"]["max"] = 0
+        patterns["price_range"]["avg"] = 0
+
+    return patterns
+
+def calculate_category_score(
+    event: Dict[str, Any],
+    category_weights: Dict[str, float],
+    subcategory_weights: Dict[str, float]
+) -> float:
+    """Calculate category preference score"""
+    
+    category_score = category_weights.get(event["main_category"], 0)
+    subcategory_score = subcategory_weights.get(event["sub_category"], 0)
+    
+    return (category_score * 0.6 + subcategory_score * 0.4)
+
+def calculate_rsvp_similarity(
+    event: Dict[str, Any],
+    rsvp_patterns: Dict[str, Any]
+) -> float:
+    """Calculate similarity to past RSVP patterns"""
+    
+    if rsvp_patterns["total_rsvps"] == 0:
+        return 0.5  # Neutral score if no RSVP history
+
+    category_similarity = (
+        rsvp_patterns["categories"][event["main_category"]] / 
+        rsvp_patterns["total_rsvps"]
+    )
+    
+    subcategory_similarity = (
+        rsvp_patterns["subcategories"][event["sub_category"]] / 
+        rsvp_patterns["total_rsvps"]
+    )
+    
+    venue_similarity = (
+        rsvp_patterns["venues"][event["venue"]] / 
+        rsvp_patterns["total_rsvps"]
+    )
+    
+    return (
+        category_similarity * 0.4 +
+        subcategory_similarity * 0.4 +
+        venue_similarity * 0.2
+    )
+
+def calculate_location_score(
+    event: Dict[str, Any],
+    user_location: Dict[str, Any]
+) -> float:
+    """Calculate location proximity score"""
+    
+    if not (event.get("location", {}).get("coordinates") and 
+            user_location.get("coordinates")):
+        return 0.5  # Neutral score if location data missing
+
+    distance = calculate_distance(
+        user_location["coordinates"]["latitude"],
+        user_location["coordinates"]["longitude"],
+        event["location"]["coordinates"]["latitude"],
+        event["location"]["coordinates"]["longitude"]
+    )
+    
+    # Score decreases as distance increases (max distance 50km)
+    return max(0, 1 - (distance / 50))
+
+def calculate_interest_match(
+    event: Dict[str, Any],
+    interests: List[str]
+) -> float:
+    """Calculate match with user interests"""
+    
+    if not interests:
+        return 0.5  # Neutral score if no interests
+
+    event_text = f"{event['title']} {event['description']}".lower()
+    matching_interests = sum(
+        1 for interest in interests 
+        if interest.lower() in event_text
+    )
+    
+    return matching_interests / len(interests)
+
+def calculate_price_compatibility(
+    event: Dict[str, Any],
+    price_range: Dict[str, float]
+) -> float:
+    """Calculate price compatibility score"""
+    
+    event_price = event.get("registrationFee", 0)
+    
+    if price_range["max"] == 0:
+        return 1.0 if event_price == 0 else 0.5
+    
+    if event_price == 0:
+        return 1.0  # Free events are always compatible
+        
+    # Calculate how close the event price is to user's average
+    price_diff = abs(event_price - price_range["avg"])
+    price_range_size = price_range["max"] - price_range["min"]
+    
+    if price_range_size == 0:
+        return 1.0 if event_price == price_range["avg"] else 0.0
+        
+    return max(0, 1 - (price_diff / price_range_size))
+
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance between two points in kilometers"""
+    R = 6371  # Earth's radius in kilometers
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
+
+@app.get("/recommendations/{user_id}")
+async def get_recommendations(
+    user_id: str,
+    user_email: str,
+    latitude: float = None,
+    longitude: float = None,
+    limit: int = 10
+):
+    """Get personalized event recommendations"""
+    try:
+        user_location = {
+            "coordinates": {
+                "latitude": latitude,
+                "longitude": longitude
+            }
+        } if latitude and longitude else {}
+
+        recommendations = await calculate_event_recommendations(
+            db,
+            user_id,
+            user_email,
+            user_location,
+            limit
+        )
+
+        # Print detailed scoring for debugging
+        for i, rec in enumerate(recommendations[:3], 1):
+            print(f"\nTop Recommendation {i}:")
+            print(f"Title: {rec['event']['title']}")
+            print(f"Final Score: {rec['score']:.3f}")
+            print("Score Breakdown:")
+            for category, score in rec['score_breakdown'].items():
+                print(f"- {category}: {score:.3f}")
+
+        return {
+            "recommendations": [r["event"] for r in recommendations],
+            "scores": [{"score": r["score"], "breakdown": r["score_breakdown"]} 
+                      for r in recommendations]
+        }
+
+    except Exception as e:
+        print(f"Error in recommendations endpoint: {e}")
+        raise HttpException(status_code=500, detail=str(e))
 
 @app.post("/categorize/ticketmaster")
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
@@ -334,12 +638,12 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
             print(f"[{datetime.now()}] Failed to process event: {event_data.get('name', 'Unknown')}")
             return None
         
-        # Debug: Print location data before save
-        print("\nLocation data before saving to MongoDB:")
-        print(json.dumps({
-            'title': processed_event['title'],
-            'location': processed_event.get('location')
-        }, indent=2))
+        # # Debug: Print location data before save
+        # print("\nLocation data before saving to MongoDB:")
+        # print(json.dumps({
+        #     'title': processed_event['title'],
+        #     'location': processed_event.get('location')
+        # }, indent=2))
         
         # Check for duplicates before saving
         is_duplicate = await is_duplicate_event(db, processed_event)
@@ -360,13 +664,13 @@ async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
             processing_duration = (processing_end - processing_start).total_seconds()
             print(f"[{processing_end}] Successfully saved new event: {processed_event['title']} (Duration: {processing_duration}s)")
 
-            if result.inserted_id:
-                saved_event = await db.events.find_one({'_id': result.inserted_id})
-                print("\nVerifying saved location data:")
-                print(json.dumps({
-                    'title': saved_event['title'],
-                    'location': saved_event.get('location')
-                }, indent=2))
+            # if result.inserted_id:
+            #     saved_event = await db.events.find_one({'_id': result.inserted_id})
+            #     print("\nVerifying saved location data:")
+            #     print(json.dumps({
+            #         'title': saved_event['title'],
+            #         'location': saved_event.get('location')
+            #     }, indent=2))
             return processed_event
         
         except Exception as db_error:
