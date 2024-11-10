@@ -355,7 +355,7 @@ async def calculate_event_recommendations(
 
         # Get user's click history
         click_history = await db.clickcounts.find({
-            "userId": user_id
+            "userId": user_email
         }).to_list(None)
 
         # Get user's RSVP history
