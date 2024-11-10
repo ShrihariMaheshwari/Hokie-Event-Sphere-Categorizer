@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HttpException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import openai
 import os
@@ -338,7 +338,7 @@ async def calculate_event_recommendations(
         # Get user profile and preferences
         user_profile = await db.userprofiles.find_one({"_id": ObjectId(user_id)})
         if not user_profile:
-            raise HttpException(status_code=404, detail="User profile not found")
+            raise HTTPException(status_code=404, detail="User profile not found")
 
         # Get user's click history
         click_history = await db.clickcounts.find({
@@ -423,7 +423,7 @@ async def calculate_event_recommendations(
 
     except Exception as e:
         print(f"Error calculating recommendations: {e}")
-        raise HttpException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
     
 def analyze_rsvp_patterns(rsvp_history: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Analyze user's RSVP patterns"""
@@ -623,7 +623,7 @@ async def get_recommendations(
 
     except Exception as e:
         print(f"Error in recommendations endpoint: {e}")
-        raise HttpException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/categorize/ticketmaster")
 async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
