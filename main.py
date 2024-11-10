@@ -335,10 +335,23 @@ async def calculate_event_recommendations(
     """Calculate personalized event recommendations"""
     
     try:
+        print("\nStarting recommendation calculation...")
+
+        # Initialize weights
+        weights = {
+            "category": 0.30,
+            "rsvp": 0.25,
+            "location": 0.20,
+            "interests": 0.15,
+            "price": 0.10
+        }
+
         # Get user profile and preferences
         user_profile = await db.userprofiles.find_one({"_id": ObjectId(user_id)})
         if not user_profile:
             raise HTTPException(status_code=404, detail="User profile not found")
+        
+        print(f"Processing recommendations for user: {user_email}")
 
         # Get user's click history
         click_history = await db.clickcounts.find({
@@ -403,13 +416,7 @@ async def calculate_event_recommendations(
             }
 
             # Calculate final weighted score
-            final_score = (
-                scores["category"] * 0.30 +
-                scores["rsvp"] * 0.25 +
-                scores["location"] * 0.20 +
-                scores["interests"] * 0.15 +
-                scores["price"] * 0.10
-            )
+            final_score = sum(score * weights[key] for key, score in scores.items())
 
             scored_events.append({
                 "event": event,
@@ -437,7 +444,7 @@ def analyze_rsvp_patterns(rsvp_history: List[Dict[str, Any]]) -> Dict[str, Any]:
             "avg": 0
         },
         "venues": defaultdict(int),
-        "total_rsvps": len(rsvp_history)
+        "total_rsvps": len(rsvp_history) or 1 # Avoid division by zero
     }
 
     total_price = 0
@@ -581,6 +588,39 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     c = 2 * math.asin(math.sqrt(a))
     return R * c
 
+# Custom JSON encoder for MongoDB ObjectId
+class CustomJSONEncoder:
+    @staticmethod
+    def encode_event(event: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert MongoDB document to JSON-serializable format"""
+        event_copy = dict(event)
+        
+        # Convert ObjectId to string
+        if '_id' in event_copy:
+            event_copy['_id'] = str(event_copy['_id'])
+            
+        # Convert organizerId if it's ObjectId
+        if 'organizerId' in event_copy and isinstance(event_copy['organizerId'], ObjectId):
+            event_copy['organizerId'] = str(event_copy['organizerId'])
+            
+        # Convert dates to ISO format strings
+        if 'startDate' in event_copy:
+            event_copy['startDate'] = event_copy['startDate'].isoformat()
+        if 'endDate' in event_copy:
+            event_copy['endDate'] = event_copy['endDate'].isoformat()
+        if 'createdAt' in event_copy:
+            event_copy['createdAt'] = event_copy['createdAt'].isoformat()
+        if 'updatedAt' in event_copy:
+            event_copy['updatedAt'] = event_copy['updatedAt'].isoformat()
+            
+        # Handle RSVP dates
+        if 'rsvps' in event_copy:
+            for rsvp in event_copy['rsvps']:
+                if 'createdAt' in rsvp:
+                    rsvp['createdAt'] = rsvp['createdAt'].isoformat()
+                    
+        return event_copy
+
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(
     user_id: str,
@@ -606,8 +646,18 @@ async def get_recommendations(
             limit
         )
 
-        # Print detailed scoring for debugging
-        for i, rec in enumerate(recommendations[:3], 1):
+        # Convert recommendations to JSON-serializable format
+        processed_recommendations = []
+        for rec in recommendations:
+            processed_event = CustomJSONEncoder.encode_event(rec["event"])
+            processed_recommendations.append({
+                "event": processed_event,
+                "score": rec["score"],
+                "score_breakdown": rec["score_breakdown"]
+            })
+
+        # Print debug info for top recommendations
+        for i, rec in enumerate(processed_recommendations[:3], 1):
             print(f"\nTop Recommendation {i}:")
             print(f"Title: {rec['event']['title']}")
             print(f"Final Score: {rec['score']:.3f}")
@@ -616,9 +666,11 @@ async def get_recommendations(
                 print(f"- {category}: {score:.3f}")
 
         return {
-            "recommendations": [r["event"] for r in recommendations],
-            "scores": [{"score": r["score"], "breakdown": r["score_breakdown"]} 
-                      for r in recommendations]
+            "recommendations": [r["event"] for r in processed_recommendations],
+            "scores": [{
+                "score": r["score"],
+                "breakdown": r["score_breakdown"]
+            } for r in processed_recommendations]
         }
 
     except Exception as e:
