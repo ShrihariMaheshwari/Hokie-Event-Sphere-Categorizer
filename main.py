@@ -630,13 +630,13 @@ async def get_recommendations(
                     "date": event["startDate"].strftime("%Y-%m-%d"),
                     "score": {
                         "total": round(float(rec["score"]), 3),
-                        "breakdown": {
-                            "category": round(float(rec["score_breakdown"]["category"]), 3),
-                            "rsvp": round(float(rec["score_breakdown"]["rsvp"]), 3),
-                            "location": round(float(rec["score_breakdown"]["location"]), 3),
-                            "interests": round(float(rec["score_breakdown"]["interests"]), 3),
-                            "price": round(float(rec["score_breakdown"]["price"]), 3)
-                        }
+                        # "breakdown": {
+                        #     "category": round(float(rec["score_breakdown"]["category"]), 3),
+                        #     "rsvp": round(float(rec["score_breakdown"]["rsvp"]), 3),
+                        #     "location": round(float(rec["score_breakdown"]["location"]), 3),
+                        #     "interests": round(float(rec["score_breakdown"]["interests"]), 3),
+                        #     "price": round(float(rec["score_breakdown"]["price"]), 3)
+                        # }
                     }
                 })
             except Exception as e:
