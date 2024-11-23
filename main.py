@@ -11,15 +11,11 @@ from cron.ticketmaster_sync import start_scheduler
 import json
 import math
 from collections import defaultdict
-from transformers import AutoTokenizer, AutoModel
-import torch
-import numpy as np
-from annoy import AnnoyIndex
-import asyncio
-from functools import lru_cache
+
 
 app = FastAPI(title="Hokie Event Categorizer")
 
+# CORS and DB setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[os.getenv("EXPRESS_BACKEND_URL", "*")],
@@ -30,64 +26,12 @@ app.add_middleware(
 
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(os.getenv("MONGO_URI"))
 db = mongo_client.events_db
+
+# OpenAI client setup (new way)
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# BERT and Annoy initialization
-tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-model = AutoModel.from_pretrained('bert-base-uncased')
-EMBEDDING_DIM = 768
-event_embeddings_cache = {}
-annoy_index = None
-
-def create_event_embedding(event: Dict[str, Any]) -> np.ndarray:
-    event_text = f"{event['title']} {event['description']} {event['main_category']} {event['sub_category']}"
-    inputs = tokenizer(event_text, return_tensors='pt', padding=True, truncation=True, max_length=512)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    embedding = outputs.last_hidden_state[0, 0, :].numpy()
-    return embedding
-
-async def build_annoy_index(events: List[Dict[str, Any]]) -> AnnoyIndex:
-    index = AnnoyIndex(EMBEDDING_DIM, 'angular')
-    for i, event in enumerate(events):
-        if event['_id'] not in event_embeddings_cache:
-            embedding = create_event_embedding(event)
-            event_embeddings_cache[str(event['_id'])] = {
-                'embedding': embedding,
-                'event': event,
-                'index': i
-            }
-        index.add_item(i, event_embeddings_cache[str(event['_id'])]['embedding'])
-    index.build(10)
-    return index
-
-@lru_cache(maxsize=1)
-def get_annoy_index():
-    return annoy_index
-
-async def update_recommendations_index():
-    global annoy_index
-    current_date = datetime.utcnow()
-    events = await db.events.find({"startDate": {"$gte": current_date}}).to_list(None)
-    annoy_index = await build_annoy_index(events)
-    return annoy_index
-
-async def get_similar_events(event_embedding: np.ndarray, n_neighbors: int = 10) -> List[Dict[str, Any]]:
-    index = get_annoy_index()
-    if not index:
-        await update_recommendations_index()
-        index = get_annoy_index()
-    
-    similar_indices = index.get_nns_by_vector(event_embedding, n_neighbors)
-    similar_events = []
-    for idx in similar_indices:
-        for cache_item in event_embeddings_cache.values():
-            if cache_item['index'] == idx:
-                similar_events.append(cache_item['event'])
-                break
-    return similar_events
-
 async def categorize_with_gpt(event_data: Dict[str, Any]):
+    """Improved event categorization using GPT"""
     try:
         event_info = (
             f"Event: {event_data['title']}, "
@@ -97,67 +41,108 @@ async def categorize_with_gpt(event_data: Dict[str, Any]):
 
         prompt = f"""
         Analyze this event carefully and categorize it based on its type and content. 
+        
         Event Information: {event_info}
+
         Choose the most appropriate category and subcategory from these options:
+
         1. Sports Events:
-           - Live Sports Events
-           - Amateur Sports Events
-           - Sports Meetups
+           - Live Sports Events (for any professional or collegiate sports games)
+           - Amateur Sports Events (for recreational or amateur competitions)
+           - Sports Meetups (for sports-related gatherings)
+
         2. Entertainment Events:
-           - Concerts & Music
-           - Theater & Drama
-           - Comedy Shows
-           - Family Entertainment
+           - Concerts & Music (for any musical performance)
+           - Theater & Drama (for plays, musicals, dramatic performances)
+           - Comedy Shows (for stand-up comedy, comedy performances)
+           - Family Entertainment (for family-friendly shows, Disney on Ice, etc.)
+
         3. Cultural Events:
-           - Art & Exhibition
-           - Food & Drink
-           - Cultural Festivals
+           - Art & Exhibition (for art shows, museum exhibitions)
+           - Food & Drink (for food festivals, wine tastings)
+           - Cultural Festivals (for cultural celebrations)
+
         4. Educational Events:
-           - Conferences
-           - Workshops
-           - Tech Events
+           - Conferences (for professional conferences)
+           - Workshops (for learning sessions)
+           - Tech Events (for technology-related events)
+
         5. Social Events:
            - Community Gatherings
            - Networking Events
            - Holiday Celebrations
+
+        Also generate a compelling description if the current one is too brief.
+
         Return ONLY a JSON object in this exact format:
         {{
             "main_category": "category name",
             "sub_category": "specific subcategory name",
             "description": "detailed event description"
         }}
+
+        The categorization should be very specific and accurate based on the event details provided.
         """
 
+        # Using the new OpenAI client format
         response = await asyncio.to_thread(
             client.chat.completions.create,
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an expert event categorizer."},
+                {
+                    "role": "system", 
+                    "content": "You are an expert event categorizer with deep knowledge of different types of events. Provide accurate and specific categorizations."
+                },
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3
+            temperature=0.3  # Lower temperature for more consistent categorization
         )
 
+        # Extract and validate the response
         if response.choices and response.choices[0].message:
             try:
                 result = json.loads(response.choices[0].message.content)
+                
+                # Validate main category and provide fallback if needed
                 main_categories = [
                     "Sports Events", "Entertainment Events", "Cultural Events",
                     "Educational Events", "Social Events"
                 ]
                 
                 if result["main_category"] not in main_categories:
-                    return infer_category_from_title(event_data)
+                    # Try to infer category from event title and description
+                    event_text = f"{event_data['title']} {event_data.get('description', '')}".lower()
                     
+                    if any(word in event_text for word in ['concert', 'music', 'band', 'singer', 'performance']):
+                        result["main_category"] = "Entertainment Events"
+                        result["sub_category"] = "Concerts & Music"
+                    elif any(word in event_text for word in ['sports', 'game', 'match', 'tournament']):
+                        result["main_category"] = "Sports Events"
+                        result["sub_category"] = "Live Sports Events"
+                    elif any(word in event_text for word in ['comedy', 'standup', 'laugh']):
+                        result["main_category"] = "Entertainment Events"
+                        result["sub_category"] = "Comedy Shows"
+                    elif any(word in event_text for word in ['conference', 'tech', 'workshop']):
+                        result["main_category"] = "Educational Events"
+                        result["sub_category"] = "Conferences"
+                    else:
+                        result["main_category"] = "Entertainment Events"
+                        result["sub_category"] = "General Entertainment"
+
+                # Ensure we have a good description
                 if not result.get("description") or len(result["description"]) < 50:
                     result["description"] = (
                         f"Join us for {event_data['title']} at {event_data['venue']}! "
-                        f"This {result['sub_category']} event promises to be an unforgettable experience."
+                        f"This {result['sub_category']} event promises to be an unforgettable experience. "
+                        f"Don't miss out on this exciting {result['main_category'].lower()} gathering!"
                     )
+
+                print(f"Categorized '{event_data['title']}' as: {result['main_category']} - {result['sub_category']}")
                 
                 return result
                 
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as json_error:
+                print(f"JSON parsing error: {json_error}")
                 return infer_category_from_title(event_data)
                 
         return infer_category_from_title(event_data)
@@ -167,18 +152,21 @@ async def categorize_with_gpt(event_data: Dict[str, Any]):
         return infer_category_from_title(event_data)
 
 def infer_category_from_title(event_data: Dict[str, Any]):
+    """Infer category from event title and description when GPT fails"""
     title_lower = event_data['title'].lower()
     desc_lower = event_data.get('description', '').lower()
     combined_text = f"{title_lower} {desc_lower}"
 
+    # Keywords for different categories
     category_keywords = {
-        "Sports Events": ['game', 'sports', 'basketball', 'football', 'baseball', 'tournament'],
-        "Entertainment Events": ['concert', 'music', 'show', 'performance', 'band', 'singer'],
-        "Cultural Events": ['festival', 'art', 'exhibition', 'museum', 'cultural', 'food'],
-        "Educational Events": ['conference', 'workshop', 'tech', 'learning', 'seminar'],
-        "Social Events": ['party', 'gathering', 'meetup', 'social', 'networking']
+        "Sports Events": ['game', 'sports', 'basketball', 'football', 'baseball', 'hockey', 'match', 'tournament'],
+        "Entertainment Events": ['concert', 'music', 'show', 'performance', 'band', 'singer', 'live', 'tour'],
+        "Cultural Events": ['festival', 'art', 'exhibition', 'museum', 'cultural', 'food', 'wine'],
+        "Educational Events": ['conference', 'workshop', 'tech', 'learning', 'seminar', 'training'],
+        "Social Events": ['party', 'gathering', 'meetup', 'social', 'networking', 'celebration']
     }
 
+    # Subcategory mappings
     subcategory_mappings = {
         "Sports Events": "Live Sports Events",
         "Entertainment Events": "Concerts & Music",
@@ -187,6 +175,7 @@ def infer_category_from_title(event_data: Dict[str, Any]):
         "Social Events": "Community Gatherings"
     }
 
+    # Find matching category
     for category, keywords in category_keywords.items():
         if any(keyword in combined_text for keyword in keywords):
             return {
@@ -195,11 +184,146 @@ def infer_category_from_title(event_data: Dict[str, Any]):
                 "description": event_data.get('description') or f"Join us for {event_data['title']} at {event_data['venue']}!"
             }
 
+    # Default to Entertainment Events if no match found
     return {
         "main_category": "Entertainment Events",
         "sub_category": "General Entertainment",
         "description": event_data.get('description') or f"Join us for {event_data['title']} at {event_data['venue']}!"
     }
+
+async def is_duplicate_event(db, event_data: Dict[str, Any]) -> bool:
+    """
+    Check if an event already exists in the database.
+    Returns True if it's a duplicate, False otherwise.
+    """
+
+    try:
+        #Get the ticketmaster id if available
+        ticketmaster_id = event_data.get('id')
+
+        # Check for existing event with same Ticketmaster ID
+        if ticketmaster_id:
+            existing_event = await db.events.find_one({
+                "ticketmaster_id":   ticketmaster_id 
+            })
+            if existing_event:
+                print(f"[{datetime.now()}] Duplicate found by ticketmaster_id: {ticketmaster_id}")
+                return True
+            
+        # If no Ticketmaster ID or not found, check for similar events by title and date
+        title = event_data.get('title')
+        start_date = event_data.get('startDate')
+        venue = event_data.get('venue')
+
+        if all([title, start_date, venue]):
+                existing_event = await db.events.find_one({
+                    "title": title,
+                    "startDate": start_date,
+                    "venue": venue
+                })
+                if existing_event:
+                    print(f"[{datetime.now()}] Duplicate found by title/date/venue: {title}")
+                    return True
+        return False
+    except Exception as e:
+        print(f"[{datetime.now()}] Error checking for duplicates: {e}")
+        return False
+
+async def process_ticketmaster_event(event: dict):
+    """Process Ticketmaster event to match MongoDB schema"""
+    try:
+
+        # Get venue details for location
+        venue = event.get('_embedded', {}).get('venues', [{}])[0]
+        # print("\nProcessing venue data:")
+        # print(json.dumps({
+        #     'name': venue.get('name'),
+        #     'address': venue.get('address'),
+        #     'city': venue.get('city'),
+        #     'state': venue.get('state'),
+        #     'postalCode': venue.get('postalCode'),
+        #     'location': venue.get('location')
+        # }, indent=2))
+
+        # Extract location data
+        location = {
+            'address': venue.get('address', {}).get('line1', ''),
+            'city': venue.get('city', {}).get('name', ''),
+            'state': venue.get('state', {}).get('stateCode', ''),
+            'postalCode': venue.get('postalCode', ''),
+            'coordinates': {
+                'latitude': float(venue.get('location', {}).get('latitude', 0)) if venue.get('location', {}).get('latitude') else 0,
+                'longitude': float(venue.get('location', {}).get('longitude', 0)) if venue.get('location', {}).get('longitude') else 0
+            }
+        }
+
+        # # Debug: Print extracted location
+        # print("\nExtracted location data:")
+        # print(json.dumps(location, indent=2))
+
+        # Basic event data
+        event_data = {
+            'title': event.get('name', ''),
+            'venue': event.get('_embedded', {}).get('venues', [{}])[0].get('name', 'Venue Not Specified'),
+            'organizerId': str(ObjectId()),  # Generate new ObjectId for organizerId
+            'organizerEmail': 'events@ticketmaster.com',
+            'description': event.get('description', ''),
+            'imageUrl': event.get('images', [{'url': None}])[0].get('url', None),
+            'rsvps': [],
+            'ticketmaster_id': event.get('id'), # Add Ticketmaster ID for deduplication
+            'location': location
+        }
+
+        # Handle dates
+        try:
+            event_data['startDate'] = datetime.fromisoformat(event['dates']['start']['localDate'])
+            event_data['endDate'] = datetime.fromisoformat(
+                event['dates'].get('end', {}).get('localDate', event['dates']['start']['localDate'])
+            )
+            event_data['startTime'] = event['dates']['start'].get('localTime', '19:00:00')
+            
+            # Calculate end time
+            if not event['dates'].get('end', {}).get('localTime'):
+                end_datetime = datetime.strptime(event_data['startTime'], '%H:%M:%S') + timedelta(hours=3)
+                event_data['endTime'] = end_datetime.strftime('%H:%M:%S')
+            else:
+                event_data['endTime'] = event['dates']['end']['localTime']
+        except Exception as date_error:
+            print(f"Date error for {event_data['title']}: {date_error}")
+            current_time = datetime.now()
+            event_data.update({
+                'startDate': current_time,
+                'endDate': current_time + timedelta(hours=3),
+                'startTime': '19:00:00',
+                'endTime': '22:00:00'
+            })
+
+        # Handle registration fee
+        try:
+            if event.get('priceRanges'):
+                event_data['registrationFee'] = min(price['min'] for price in event['priceRanges'])
+            else:
+                event_data['registrationFee'] = 0
+        except:
+            event_data['registrationFee'] = 0
+
+        # Get category and enhanced description
+        enhanced_data = await categorize_with_gpt(event_data)
+        event_data.update(enhanced_data)
+
+        # print("\nFinal event data location before saving:")
+        # print(json.dumps({
+        #     'title': event_data['title'],
+        #     'venue': event_data['venue'],
+        #     'location': event_data['location']
+        # }, indent=2))
+
+        return event_data
+
+    except Exception as e:
+        print(f"Error processing event {event.get('name', 'Unknown')}: {e}")
+        return None
+    
 
 async def calculate_event_recommendations(
     db,
@@ -208,36 +332,12 @@ async def calculate_event_recommendations(
     user_location: Dict[str, Any],
     limit: int = 10
 ) -> List[Dict[str, Any]]:
+    """Calculate personalized event recommendations"""
+    
     try:
-        weighted_recs = await calculate_weighted_recommendations(
-            db, user_id, user_email, user_location, limit
-        )
-        
-        semantic_recs = await calculate_semantic_recommendations(
-            db, user_id, user_email, limit
-        )
-        
-        final_recommendations = combine_recommendations(
-            weighted_recs,
-            semantic_recs,
-            weight_collaborative=0.6,
-            weight_semantic=0.4
-        )
-        
-        return final_recommendations[:limit]
-        
-    except Exception as e:
-        print(f"Error calculating recommendations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print("\nStarting recommendation calculation...")
 
-async def calculate_weighted_recommendations(
-    db,
-    user_id: str,
-    user_email: str,
-    user_location: Dict[str, Any],
-    limit: int = 10
-) -> List[Dict[str, Any]]:
-    try:
+        # Initialize weights
         weights = {
             "category": 0.30,
             "rsvp": 0.25,
@@ -246,18 +346,24 @@ async def calculate_weighted_recommendations(
             "price": 0.10
         }
 
+        # Get user profile and preferences
         user_profile = await db.userprofiles.find_one({"_id": ObjectId(user_id)})
         if not user_profile:
             raise HTTPException(status_code=404, detail="User profile not found")
+        
+        print(f"Processing recommendations for user: {user_email}")
 
+        # Get user's click history
         click_history = await db.clickcounts.find({
             "userId": user_email
         }).to_list(None)
 
+        # Get user's RSVP history
         rsvp_history = await db.events.find({
             "rsvps.email": user_email
         }).to_list(None)
 
+        # Calculate category preferences from clicks
         category_weights = defaultdict(float)
         subcategory_weights = defaultdict(float)
         total_clicks = 0
@@ -268,145 +374,91 @@ async def calculate_weighted_recommendations(
             for sub in click["subCategories"]:
                 subcategory_weights[sub["subCategory"]] += sub["subCategoryCount"]
 
+        # Normalize weights
         if total_clicks > 0:
             category_weights = {k: v/total_clicks for k, v in category_weights.items()}
             subcategory_weights = {k: v/total_clicks for k, v in subcategory_weights.items()}
 
+        # Analyze RSVP patterns
         rsvp_patterns = analyze_rsvp_patterns(rsvp_history)
 
+        # Get future events
         current_date = datetime.utcnow()
         future_events = await db.events.find({
             "startDate": {"$gte": current_date}
         }).to_list(None)
 
+        # Score and rank events
         scored_events = []
         for event in future_events:
             scores = {
-                "category": calculate_category_score(event, category_weights, subcategory_weights),
-                "rsvp": calculate_rsvp_similarity(event, rsvp_patterns),
-                "location": calculate_location_score(event, user_location),
-                "interests": calculate_interest_match(event, user_profile.get("interests", [])),
-                "price": calculate_price_compatibility(event, rsvp_patterns["price_range"])
+                "category": calculate_category_score(
+                    event, 
+                    category_weights, 
+                    subcategory_weights
+                ),
+                "rsvp": calculate_rsvp_similarity(
+                    event, 
+                    rsvp_patterns
+                ),
+                "location": calculate_location_score(
+                    event, 
+                    user_location
+                ),
+                "interests": calculate_interest_match(
+                    event, 
+                    user_profile.get("interests", [])
+                ),
+                "price": calculate_price_compatibility(
+                    event, 
+                    rsvp_patterns["price_range"]
+                )
             }
 
+            # Calculate final weighted score
             final_score = sum(score * weights[key] for key, score in scores.items())
+
             scored_events.append({
                 "event": event,
                 "score": final_score,
                 "score_breakdown": scores
             })
 
+        # Sort by score and return top events
         scored_events.sort(key=lambda x: x["score"], reverse=True)
         return scored_events[:limit]
 
     except Exception as e:
         print(f"Error calculating recommendations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-async def calculate_semantic_recommendations(
-    db,
-    user_id: str,
-    user_email: str,
-    limit: int = 10
-) -> List[Dict[str, Any]]:
-    try:
-        user_events = await db.events.find({
-            "rsvps.email": user_email
-        }).to_list(None)
-        
-        if not user_events:
-            return []
-        
-        user_profile_embedding = np.zeros(EMBEDDING_DIM)
-        for event in user_events:
-            if str(event['_id']) not in event_embeddings_cache:
-                embedding = create_event_embedding(event)
-                event_embeddings_cache[str(event['_id'])] = {
-                    'embedding': embedding,
-                    'event': event,
-                    'index': len(event_embeddings_cache)
-                }
-            user_profile_embedding += event_embeddings_cache[str(event['_id'])]['embedding']
-        
-        if len(user_events) > 0:
-            user_profile_embedding /= len(user_events)
-        
-        similar_events = await get_similar_events(user_profile_embedding, limit)
-        
-        scored_events = []
-        for event in similar_events:
-            event_embedding = event_embeddings_cache[str(event['_id'])]['embedding']
-            similarity_score = 1 - np.dot(user_profile_embedding, event_embedding) / (
-                np.linalg.norm(user_profile_embedding) * np.linalg.norm(event_embedding)
-            )
-            
-            scored_events.append({
-                "event": event,
-                "score": similarity_score
-            })
-        
-        return scored_events
-        
-    except Exception as e:
-        print(f"Error in semantic recommendations: {e}")
-        return []
-
-def combine_recommendations(
-    weighted_recs: List[Dict[str, Any]],
-    semantic_recs: List[Dict[str, Any]],
-    weight_collaborative: float = 0.6,
-    weight_semantic: float = 0.4
-) -> List[Dict[str, Any]]:
-    combined_scores = {}
     
-    def normalize_scores(recs):
-        scores = [r['score'] for r in recs]
-        min_score, max_score = min(scores), max(scores)
-        score_range = max_score - min_score
-        return {str(r['event']['_id']): (r['score'] - min_score) / score_range 
-                if score_range > 0 else 0.5 for r in recs}
-    
-    weighted_scores = normalize_scores(weighted_recs)
-    semantic_scores = normalize_scores(semantic_recs)
-    
-    all_events = set(weighted_scores.keys()) | set(semantic_scores.keys())
-    for event_id in all_events:
-        w_score = weighted_scores.get(event_id, 0)
-        s_score = semantic_scores.get(event_id, 0)
-        combined_scores[event_id] = (
-            w_score * weight_collaborative + 
-            s_score * weight_semantic
-        )
-    
-    final_recs = []
-    for event_id, score in sorted(combined_scores.items(), key=lambda x: x[1], reverse=True):
-        event = next((r['event'] for r in weighted_recs + semantic_recs 
-                     if str(r['event']['_id']) == event_id), None)
-        if event:
-            final_recs.append({
-                "event": event,
-                "score": score
-            })
-    
-    return final_recs
-
 def analyze_rsvp_patterns(rsvp_history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Analyze user's RSVP patterns"""
+    
     patterns = {
         "categories": defaultdict(int),
         "subcategories": defaultdict(int),
-        "price_range": {"min": float('inf'), "max": 0, "avg": 0},
+        "price_range": {
+            "min": float('inf'),
+            "max": 0,
+            "avg": 0
+        },
         "venues": defaultdict(int),
-        "total_rsvps": len(rsvp_history) or 1
+        "total_rsvps": len(rsvp_history) or 1 # Avoid division by zero
     }
 
     total_price = 0
     price_count = 0
 
     for event in rsvp_history:
+        # Category preferences
         patterns["categories"][event["main_category"]] += 1
         patterns["subcategories"][event["sub_category"]] += 1
+        
+        # Venue preferences
         patterns["venues"][event["venue"]] += 1
         
+        # Price analysis
         if event.get("registrationFee", 0) > 0:
             price = event["registrationFee"]
             patterns["price_range"]["min"] = min(patterns["price_range"]["min"], price)
@@ -414,10 +466,13 @@ def analyze_rsvp_patterns(rsvp_history: List[Dict[str, Any]]) -> Dict[str, Any]:
             total_price += price
             price_count += 1
 
+    # Calculate average price
     if price_count > 0:
         patterns["price_range"]["avg"] = total_price / price_count
     elif patterns["price_range"]["min"] == float('inf'):
-        patterns["price_range"].update({"min": 0, "max": 0, "avg": 0})
+        patterns["price_range"]["min"] = 0
+        patterns["price_range"]["max"] = 0
+        patterns["price_range"]["avg"] = 0
 
     return patterns
 
@@ -426,29 +481,52 @@ def calculate_category_score(
     category_weights: Dict[str, float],
     subcategory_weights: Dict[str, float]
 ) -> float:
+    """Calculate category preference score"""
+    
     category_score = category_weights.get(event["main_category"], 0)
     subcategory_score = subcategory_weights.get(event["sub_category"], 0)
+    
     return (category_score * 0.6 + subcategory_score * 0.4)
 
 def calculate_rsvp_similarity(
     event: Dict[str, Any],
     rsvp_patterns: Dict[str, Any]
 ) -> float:
-    if rsvp_patterns["total_rsvps"] == 0:
-        return 0.5
-
-    category_similarity = rsvp_patterns["categories"][event["main_category"]] / rsvp_patterns["total_rsvps"]
-    subcategory_similarity = rsvp_patterns["subcategories"][event["sub_category"]] / rsvp_patterns["total_rsvps"]
-    venue_similarity = rsvp_patterns["venues"][event["venue"]] / rsvp_patterns["total_rsvps"]
+    """Calculate similarity to past RSVP patterns"""
     
-    return (category_similarity * 0.4 + subcategory_similarity * 0.4 + venue_similarity * 0.2)
+    if rsvp_patterns["total_rsvps"] == 0:
+        return 0.5  # Neutral score if no RSVP history
+
+    category_similarity = (
+        rsvp_patterns["categories"][event["main_category"]] / 
+        rsvp_patterns["total_rsvps"]
+    )
+    
+    subcategory_similarity = (
+        rsvp_patterns["subcategories"][event["sub_category"]] / 
+        rsvp_patterns["total_rsvps"]
+    )
+    
+    venue_similarity = (
+        rsvp_patterns["venues"][event["venue"]] / 
+        rsvp_patterns["total_rsvps"]
+    )
+    
+    return (
+        category_similarity * 0.4 +
+        subcategory_similarity * 0.4 +
+        venue_similarity * 0.2
+    )
 
 def calculate_location_score(
     event: Dict[str, Any],
     user_location: Dict[str, Any]
 ) -> float:
-    if not (event.get("location", {}).get("coordinates") and user_location.get("coordinates")):
-        return 0.5
+    """Calculate location proximity score"""
+    
+    if not (event.get("location", {}).get("coordinates") and 
+            user_location.get("coordinates")):
+        return 0.5  # Neutral score if location data missing
 
     distance = calculate_distance(
         user_location["coordinates"]["latitude"],
@@ -456,40 +534,42 @@ def calculate_location_score(
         event["location"]["coordinates"]["latitude"],
         event["location"]["coordinates"]["longitude"]
     )
+    
+    # Score decreases as distance increases (max distance 50km)
     return max(0, 1 - (distance / 50))
-
-def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-    c = 2 * math.asin(math.sqrt(a))
-    return R * c
 
 def calculate_interest_match(
     event: Dict[str, Any],
     interests: List[str]
 ) -> float:
+    """Calculate match with user interests"""
+    
     if not interests:
-        return 0.5
+        return 0.5  # Neutral score if no interests
 
     event_text = f"{event['title']} {event['description']}".lower()
-    matching_interests = sum(1 for interest in interests if interest.lower() in event_text)
+    matching_interests = sum(
+        1 for interest in interests 
+        if interest.lower() in event_text
+    )
+    
     return matching_interests / len(interests)
 
 def calculate_price_compatibility(
     event: Dict[str, Any],
     price_range: Dict[str, float]
 ) -> float:
+    """Calculate price compatibility score"""
+    
     event_price = event.get("registrationFee", 0)
     
     if price_range["max"] == 0:
         return 1.0 if event_price == 0 else 0.5
-        
+    
     if event_price == 0:
-        return 1.0
+        return 1.0  # Free events are always compatible
         
+    # Calculate how close the event price is to user's average
     price_diff = abs(event_price - price_range["avg"])
     price_range_size = price_range["max"] - price_range["min"]
     
@@ -497,6 +577,16 @@ def calculate_price_compatibility(
         return 1.0 if event_price == price_range["avg"] else 0.0
         
     return max(0, 1 - (price_diff / price_range_size))
+
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate distance between two points in kilometers"""
+    R = 6371  # Earth's radius in kilometers
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
 
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(
@@ -506,7 +596,10 @@ async def get_recommendations(
     longitude: float = None,
     limit: int = 10
 ):
+    """Get personalized event recommendations"""
     try:
+        print(f"\nStarting recommendation calculation for user: {user_email}")
+        
         user_location = {
             "coordinates": {
                 "latitude": latitude,
@@ -514,6 +607,7 @@ async def get_recommendations(
             }
         } if latitude and longitude else {}
 
+        # Get recommendations
         recommendations = await calculate_event_recommendations(
             db,
             user_id,
@@ -522,6 +616,7 @@ async def get_recommendations(
             limit
         )
 
+        # Process recommendations
         processed_recs = []
         for rec in recommendations:
             try:
@@ -535,21 +630,166 @@ async def get_recommendations(
                     "date": event["startDate"].strftime("%Y-%m-%d"),
                     "score": {
                         "total": round(float(rec["score"]), 3),
+                        # "breakdown": {
+                        #     "category": round(float(rec["score_breakdown"]["category"]), 3),
+                        #     "rsvp": round(float(rec["score_breakdown"]["rsvp"]), 3),
+                        #     "location": round(float(rec["score_breakdown"]["location"]), 3),
+                        #     "interests": round(float(rec["score_breakdown"]["interests"]), 3),
+                        #     "price": round(float(rec["score_breakdown"]["price"]), 3)
+                        # }
                     }
                 })
             except Exception as e:
-                print(f"Error processing recommendation: {str(e)}")
+                print(f"Error processing individual recommendation: {str(e)}")
                 continue
 
-        return {"recommendations": processed_recs}
+        print(f"Processed {len(processed_recs)} recommendations")
+        
+        # Print debug info
+        for i, rec in enumerate(processed_recs[:3], 1):
+            print(f"\nRecommendation {i}:")
+            print(f"Title: {rec['title']}")
+            print(f"Score: {rec['score']['total']}")
+
+        return {
+            "recommendations": processed_recs
+        }
 
     except Exception as e:
         print(f"Error in recommendations endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500, 
+            detail=str(e)
+        )
+    
+@app.post("/categorize/ticketmaster")
+async def categorize_ticketmaster_event(event_data: Dict[str, Any]):
+    """Endpoint for categorizing Ticketmaster events"""
+    processing_start = datetime.now()
+    print(f"[{processing_start}] Starting to process event: {event_data.get('name', 'Unknown')}")
+
+    try:
+        processed_event = await process_ticketmaster_event(event_data)
+        
+        if not processed_event:
+            print(f"[{datetime.now()}] Failed to process event: {event_data.get('name', 'Unknown')}")
+            return None
+        
+        # # Debug: Print location data before save
+        # print("\nLocation data before saving to MongoDB:")
+        # print(json.dumps({
+        #     'title': processed_event['title'],
+        #     'location': processed_event.get('location')
+        # }, indent=2))
+        
+        # Check for duplicates before saving
+        is_duplicate = await is_duplicate_event(db, processed_event)
+        if is_duplicate:
+            print(f"[{datetime.now()}] Skipping duplicate event: {processed_event['title']}")
+            return None
+
+        # Add timestamps
+        current_time = datetime.utcnow()
+        processed_event['createdAt'] = current_time
+        processed_event['updatedAt'] = current_time
+
+        # Save to database
+        try:
+            result = await db.events.insert_one(processed_event)
+            processed_event['_id'] = str(result.inserted_id)
+            processing_end = datetime.now()
+            processing_duration = (processing_end - processing_start).total_seconds()
+            print(f"[{processing_end}] Successfully saved new event: {processed_event['title']} (Duration: {processing_duration}s)")
+
+            # if result.inserted_id:
+            #     saved_event = await db.events.find_one({'_id': result.inserted_id})
+            #     print("\nVerifying saved location data:")
+            #     print(json.dumps({
+            #         'title': saved_event['title'],
+            #         'location': saved_event.get('location')
+            #     }, indent=2))
+            return processed_event
+        
+        except Exception as db_error:
+            print(f"[{datetime.now()}] Database error: {db_error}")
+            return None
+
+    except Exception as e:
+        print(f"[{datetime.now()}] Processing error: {e}")
+        return None
+
+
+@app.post("/categorize/{event_id}")
+async def categorize_manual_event(event_id: str):
+    """Endpoint for categorizing manually created events"""
+    try:
+        obj_id = ObjectId(event_id)
+        event = await db.events.find_one({"_id": obj_id})
+        
+        if not event:
+            return {"error": "Event not found"}
+
+        # Get categories from GPT
+        enhanced_data = await categorize_with_gpt(event)
+        
+        if enhanced_data:
+            # Update the event with new categories and description
+            update_result = await db.events.update_one(
+                {"_id": obj_id},
+                {
+                    "$set": {
+                        "main_category": enhanced_data["main_category"],
+                        "sub_category": enhanced_data["sub_category"],
+                        "description": enhanced_data["description"],
+                        "updatedAt": datetime.utcnow()
+                    }
+                }
+            )
+            
+            if update_result.modified_count > 0:
+                return {"success": True, "data": enhanced_data}
+        
+        return {"success": False, "error": "Failed to update event"}
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return {"success": False, "error": str(e)}
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to Hokie Event Categorizer API",
+        "endpoints": {
+            "/categorize/{event_id}": "Categorize existing events",
+            "/categorize/ticketmaster": "Process and categorize Ticketmaster events",
+            "/health": "Health check endpoint"
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    try:
+        await db.command('ping')
+        return {
+            "status": "healthy",
+            "mongo": "connected",
+            "timestamp": datetime.utcnow()
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow()
+        }
 
 @app.on_event("startup")
 async def startup_event():
+    """Startup event handler"""
     print("\nStarting FastAPI service...")
+    
+    # Check environment variables
     required_vars = {
         "MONGO_URI": os.getenv("MONGO_URI"),
         "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY"),
@@ -561,16 +801,25 @@ async def startup_event():
         print(f"Missing required environment variables: {', '.join(missing_vars)}")
         return
 
+    print("✓ Environment variables verified")
+
     try:
         await db.command('ping')
-        await db.events.create_index("ticketmaster_id", sparse=True)
-        await db.events.create_index([("title", 1), ("startDate", 1), ("venue", 1)])
-        await update_recommendations_index()
-        asyncio.create_task(start_scheduler())
-        print("✓ Service started successfully")
-    except Exception as e:
-        print(f"Startup error: {e}")
+        print("✓ MongoDB connected")
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        # Create indexes for efficient duplicate checking
+        await db.events.create_index("ticketmaster_id", sparse=True)
+        await db.events.create_index([
+            ("title", 1),
+            ("startDate", 1),
+            ("venue", 1)
+        ])
+        print("✓ Database indexes created")
+    except Exception as e:
+        print(f"× MongoDB connection failed: {e}")
+
+    try:
+        asyncio.create_task(start_scheduler())
+        print("✓ Ticketmaster sync scheduler started")
+    except Exception as e:
+        print(f"× Scheduler start failed: {e}")
