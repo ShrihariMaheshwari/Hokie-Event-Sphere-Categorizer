@@ -269,7 +269,6 @@ async def process_ticketmaster_event(event: dict):
             'organizerEmail': 'events@ticketmaster.com',
             'description': event.get('description', ''),
             'imageUrl': event.get('images', [{'url': None}])[0].get('url', None),
-            'rsvps': [],
             'ticketmaster_id': event.get('id'), # Add Ticketmaster ID for deduplication
             'location': location
         }
