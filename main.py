@@ -457,6 +457,7 @@ async def get_recommendations(
                     "main_category": event.get("main_category", ""),
                     "sub_category": event.get("sub_category", ""),
                     "description": event.get("description", ""),
+                    "imageUrl": event.get("imageUrl", ""), 
                     "score": {
                         "total": round(float(rec["score"]), 3),
                         "breakdown": {
