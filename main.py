@@ -12,7 +12,7 @@ import json
 import math
 from collections import defaultdict
 
-
+#print(Hello World)
 app = FastAPI(title="Hokie Event Categorizer")
 
 # CORS and DB setup
